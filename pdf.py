@@ -14,24 +14,24 @@ def pngs_to_pdf_using_img2pdf():
 
     all_png_paths = []
 
-    # Get numbered folders and sort numerically
-    numbered_folders = sorted(
-        [d for d in png_root_dir.iterdir() if d.is_dir() and d.name.isdigit()],
-        key=lambda d: int(d.name)
+    # Get all folders and sort alphabetically
+    all_folders = sorted(
+        [d for d in png_root_dir.iterdir() if d.is_dir()],
+        key=lambda d: d.name.lower()  # Sort case-insensitively
     )
 
-    if not numbered_folders:
-        print("❌ No numbered folders found inside png_output")
+    if not all_folders:
+        print("❌ No folders found inside png_output")
         sys.exit(1)
 
-    print("📂 Processing folders in order:")
-    for folder in numbered_folders:
-        print(f"  ▶ Folder {folder.name}")
+    print("📂 Processing folders in alphabetical order:")
+    for folder in all_folders:
+        print(f"  ▶ Folder '{folder.name}'")
 
         png_files = sorted(folder.glob("*.png"), key=lambda p: p.name.lower())
 
         if not png_files:
-            print(f"    ⚠ No PNG files in folder {folder.name}")
+            print(f"    ⚠ No PNG files in folder '{folder.name}'")
             continue
 
         for png in png_files:
