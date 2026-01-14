@@ -2,7 +2,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
 import os
 import sys
-import subprocess  # <-- ADDED THIS IMPORT
+import subprocess
 import threading
 
 class ConverterTab:
@@ -152,6 +152,12 @@ class ConverterTab:
         options_frame = ttk.Frame(conv_frame)
         options_frame.grid(row=2, column=0, columnspan=2, sticky='w', pady=(0, 5))
         
+        # ADD THIS NEW CHECKBOX
+        self.shared_vars['auto_merge'] = tk.BooleanVar(value=True)  # Checked by default
+        
+        ttk.Checkbutton(options_frame, text="Merge to PDF automatically after conversion", 
+                       variable=self.shared_vars['auto_merge']).pack(anchor='w', pady=2)
+        
         ttk.Checkbutton(options_frame, text="Create subfolders for each SVG", 
                        variable=self.shared_vars['create_subfolders']).pack(anchor='w', pady=2)
         
@@ -292,23 +298,29 @@ class ConverterTab:
         self.convert_btn.config(state='disabled', bg="#6c757d")
         
         # Run conversion in separate thread
-        thread = threading.Thread(target=self.run_conversion)
+        thread = threading.Thread(target=self.run_conversion_and_merge)
         thread.daemon = True
         thread.start()
-
-    def update_pdf_merge_tab(self, output_path):
-        """Update PDF Merge tab with the new output folder"""
+    
+    def run_conversion_and_merge(self):
+        """Run conversion and optionally merge to PDF"""
         try:
-            # This assumes PDF Merge tab can access the converter output
-            # In a real implementation, you'd need to pass this information
-            # For now, we'll just log it
-            self.gui_app.log_message(f"📂 Conversion output available for PDF merge: {output_path}")
-        except:
-            pass
-
-        
+            # Run the conversion first
+            success = self.run_conversion()
+            
+            # If conversion successful and auto-merge is checked
+            if success and self.shared_vars['auto_merge'].get():
+                self.trigger_pdf_merge()
+            
+        except Exception as e:
+            self.gui_app.log_message(f"❌ Error: {str(e)}")
+            messagebox.showerror("Error", f"An error occurred:\n{str(e)}")
+        finally:
+            # Re-enable button
+            self.gui_app.root.after(0, lambda: self.convert_btn.config(state='normal', bg="#0078D7"))
     
     def run_conversion(self):
+        """Run the SVG to PNG conversion"""
         try:
             # Prepare arguments for png.py
             svg_folder = self.shared_vars['svg_folder'].get()
@@ -335,7 +347,7 @@ class ConverterTab:
             png_script = "png.py"
             if not os.path.exists(png_script):
                 self.gui_app.log_message("❌ Error: png.py not found in current directory!")
-                return
+                return False
             
             # Create output directory
             os.makedirs(complete_output_path, exist_ok=True)
@@ -372,26 +384,56 @@ class ConverterTab:
             
             if process.returncode == 0:
                 self.gui_app.log_message("\n✅ Conversion completed successfully!")
-
-                # Notify PDF Merge tab about the new output
-                self.update_pdf_merge_tab(complete_output_path)
                 
-                # Open output folder if option is selected
-                if open_output and os.path.exists(complete_output_path):
+                # Store the conversion output path for PDF merge
+                self.conversion_output_path = complete_output_path
+                
+                # Open output folder if option is selected (but not if auto-merge is on)
+                if open_output and os.path.exists(complete_output_path) and not self.shared_vars['auto_merge'].get():
                     try:
                         os.startfile(complete_output_path)
                         self.gui_app.log_message(f"📂 Opened output folder: {complete_output_path}")
                     except:
                         self.gui_app.log_message(f"📂 Output folder: {complete_output_path}")
                 
-                messagebox.showinfo("Success", "SVG to PNG conversion completed!")
+                return True
             else:
                 self.gui_app.log_message("\n❌ Conversion failed!")
                 messagebox.showerror("Error", "Conversion failed. Check log for details.")
+                return False
             
         except Exception as e:
             self.gui_app.log_message(f"❌ Error: {str(e)}")
             messagebox.showerror("Error", f"An error occurred:\n{str(e)}")
-        finally:
-            # Re-enable button
-            self.gui_app.root.after(0, lambda: self.convert_btn.config(state='normal', bg="#0078D7"))
+            return False
+    
+    def trigger_pdf_merge(self):
+        """Trigger the PDF merge after conversion"""
+        try:
+            self.gui_app.log_message("\n" + "="*50)
+            self.gui_app.log_message("Starting automatic PDF merge...")
+            self.gui_app.log_message("="*50)
+            
+            # Get reference to PDF merge tab
+            pdf_merge_tab = self.gui_app.pdf_merge_tab
+            
+            # Set the PNG folder to the converter output
+            if hasattr(self, 'conversion_output_path'):
+                pdf_merge_tab.manual_folder_var.set(self.conversion_output_path)
+                self.gui_app.log_message(f"📁 PNG folder set to: {self.conversion_output_path}")
+            
+            # Set output PDF to be in the same location with default name
+            output_pdf = os.path.join(self.conversion_output_path, "combined_output.pdf")
+            pdf_merge_tab.output_location_var.set(self.conversion_output_path)
+            
+            # Set PDF filename
+            pdf_merge_tab.pdf_filename_var.set("combined_output.pdf")
+            
+            # Scan the folder
+            pdf_merge_tab.scan_folder()
+            
+            # Trigger the merge
+            self.gui_app.root.after(100, pdf_merge_tab.start_merge)
+            
+        except Exception as e:
+            self.gui_app.log_message(f"❌ Failed to trigger PDF merge: {str(e)}")

@@ -25,7 +25,9 @@ class SVGtoPNGGUI:
             'dpi': tk.StringVar(value="96"),
             'create_subfolders': tk.BooleanVar(value=True),
             'open_output': tk.BooleanVar(value=False),
-            'inkscape_path': tk.StringVar(value=r"C:\Program Files\Inkscape\bin\inkscape.exe")
+            'inkscape_path': tk.StringVar(value=r"C:\Program Files\Inkscape\bin\inkscape.exe"),
+            # Add auto_merge variable here too
+            'auto_merge': tk.BooleanVar(value=True)
         }
         
         # Reference to log text widget (will be set by converter tab)
@@ -44,8 +46,8 @@ class SVGtoPNGGUI:
         
         # Initialize all tabs
         self.converter_tab = converter_tab.ConverterTab(notebook, self.shared_vars, self)
-        self.settings_tab = settings_tab.SettingsTab(notebook, self.shared_vars, self)
         self.pdf_merge_tab = pdf_merge_tab.PDFMergeTab(notebook, self.shared_vars, self)
+        self.settings_tab = settings_tab.SettingsTab(notebook, self.shared_vars, self)
         
         # Add tabs to notebook
         notebook.add(self.converter_tab.frame, text='SVG to PNG')
