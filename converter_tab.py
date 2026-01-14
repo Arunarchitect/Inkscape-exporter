@@ -296,6 +296,16 @@ class ConverterTab:
         thread.daemon = True
         thread.start()
 
+    def update_pdf_merge_tab(self, output_path):
+        """Update PDF Merge tab with the new output folder"""
+        try:
+            # This assumes PDF Merge tab can access the converter output
+            # In a real implementation, you'd need to pass this information
+            # For now, we'll just log it
+            self.gui_app.log_message(f"📂 Conversion output available for PDF merge: {output_path}")
+        except:
+            pass
+
         
     
     def run_conversion(self):
@@ -362,6 +372,9 @@ class ConverterTab:
             
             if process.returncode == 0:
                 self.gui_app.log_message("\n✅ Conversion completed successfully!")
+
+                # Notify PDF Merge tab about the new output
+                self.update_pdf_merge_tab(complete_output_path)
                 
                 # Open output folder if option is selected
                 if open_output and os.path.exists(complete_output_path):

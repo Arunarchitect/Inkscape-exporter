@@ -2,13 +2,14 @@ import tkinter as tk
 from tkinter import ttk
 import converter_tab
 import settings_tab
+import pdf_merge_tab
 
 class SVGtoPNGGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("SVG to PNG Converter")
-        self.root.geometry("650x750")
-        self.root.minsize(600, 700)
+        self.root.title("SVG to PNG Converter & PDF Merger")
+        self.root.geometry("700x800")
+        self.root.minsize(650, 750)
         
         # Set icon if available
         try:
@@ -16,7 +17,7 @@ class SVGtoPNGGUI:
         except:
             pass
         
-        # Create shared variables dictionary
+        # Variables
         self.shared_vars = {
             'svg_folder': tk.StringVar(),
             'output_folder': tk.StringVar(value="png_output"),
@@ -41,12 +42,14 @@ class SVGtoPNGGUI:
         notebook = ttk.Notebook(main_container)
         notebook.pack(fill='both', expand=True)
         
-        # Initialize tabs
+        # Initialize all tabs
         self.converter_tab = converter_tab.ConverterTab(notebook, self.shared_vars, self)
         self.settings_tab = settings_tab.SettingsTab(notebook, self.shared_vars, self)
+        self.pdf_merge_tab = pdf_merge_tab.PDFMergeTab(notebook, self.shared_vars, self)
         
         # Add tabs to notebook
-        notebook.add(self.converter_tab.frame, text='Converter')
+        notebook.add(self.converter_tab.frame, text='SVG to PNG')
+        notebook.add(self.pdf_merge_tab.frame, text='PDF Merge')
         notebook.add(self.settings_tab.frame, text='Settings')
     
     def set_log_widget(self, log_widget):
@@ -68,8 +71,8 @@ def main():
     style.theme_use('clam')
     
     # Center window on screen
-    window_width = 650
-    window_height = 750
+    window_width = 700
+    window_height = 800
     screen_width = root.winfo_screenwidth()
     screen_height = root.winfo_screenheight()
     center_x = int(screen_width/2 - window_width/2)

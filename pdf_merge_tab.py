@@ -5,6 +5,13 @@ import sys
 import threading
 from pathlib import Path
 
+# Import img2pdf at module level
+try:
+    import img2pdf
+    IMG2PDF_AVAILABLE = True
+except ImportError:
+    IMG2PDF_AVAILABLE = False
+
 class PDFMergeTab:
     def __init__(self, parent, shared_vars, gui_app):
         self.parent = parent
@@ -58,6 +65,13 @@ class PDFMergeTab:
         
         ttk.Label(title_frame, text="Combine PNG files from subfolders into a single PDF",
                  font=("Arial", 9)).pack()
+        
+        # Show img2pdf status
+        if not IMG2PDF_AVAILABLE:
+            warning_frame = ttk.Frame(content)
+            warning_frame.pack(fill='x', padx=10, pady=5)
+            ttk.Label(warning_frame, text="⚠️ img2pdf not installed! Please run: pip install img2pdf", 
+                     foreground="red", font=("Arial", 9, "bold")).pack()
         
         # ====== PNG FOLDER SELECTION ======
         folder_frame = ttk.LabelFrame(content, text="PNG Folder Selection", padding="10")
@@ -214,6 +228,10 @@ class PDFMergeTab:
                  bg="#ffc107", fg="black",
                  font=("Arial", 9),
                  padx=15, pady=8).pack(side='right', padx=(0, 10))
+        
+        # Disable merge button if img2pdf not available
+        if not IMG2PDF_AVAILABLE:
+            self.merge_btn.config(state='disabled', bg="#6c757d", text="MERGE (install img2pdf)")
     
     def browse_png_folder(self):
         folder = filedialog.askdirectory(title="Select folder containing PNG subfolders")
@@ -346,6 +364,12 @@ class PDFMergeTab:
         self.log_text.delete(1.0, tk.END)
     
     def start_merge(self):
+        # Check if img2pdf is available
+        if not IMG2PDF_AVAILABLE:
+            messagebox.showerror("Error", 
+                "img2pdf is not installed!\n\nPlease run:\npip install img2pdf")
+            return
+        
         png_folder = self.get_selected_folder()
         if not png_folder or not os.path.exists(png_folder):
             messagebox.showerror("Error", "Please select a valid PNG folder")
@@ -372,14 +396,6 @@ class PDFMergeTab:
             self.log_message(f"Open PDF After: {self.open_pdf_var.get()}")
             self.log_message("="*50)
             
-            # Import img2pdf (do it here to avoid dependency issues)
-            try:
-                import img2pdf
-            except ImportError:
-                self.log_message("❌ Error: img2pdf not installed!")
-                self.log_message("Please install: pip install img2pdf")
-                return
-            
             # Run the merge
             success = self.merge_pngs_to_pdf(png_folder, output_pdf)
             
@@ -405,7 +421,8 @@ class PDFMergeTab:
             messagebox.showerror("Error", f"An error occurred:\n{str(e)}")
         finally:
             # Re-enable button
-            self.gui_app.root.after(0, lambda: self.merge_btn.config(state='normal', bg="#28a745"))
+            if IMG2PDF_AVAILABLE:
+                self.gui_app.root.after(0, lambda: self.merge_btn.config(state='normal', bg="#28a745"))
     
     def merge_pngs_to_pdf(self, png_folder, output_pdf):
         """Core merge function using img2pdf"""
@@ -462,6 +479,7 @@ class PDFMergeTab:
             self.log_message(f"\n🔄 Creating PDF: {os.path.basename(output_pdf)}")
             self.log_message(f"📊 Total pages: {len(all_png_paths)}")
             
+            # Use img2pdf (now imported at module level)
             with open(output_pdf, "wb") as f:
                 f.write(img2pdf.convert(all_png_paths))
             
@@ -480,10 +498,9 @@ class PDFMergeTab:
         self.log_message("\n🔍 Running Merge Test...")
         
         # Check img2pdf
-        try:
-            import img2pdf
+        if IMG2PDF_AVAILABLE:
             self.log_message("✅ img2pdf is installed")
-        except ImportError:
+        else:
             self.log_message("❌ img2pdf is NOT installed")
             self.log_message("   Run: pip install img2pdf")
         
