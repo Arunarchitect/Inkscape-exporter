@@ -85,9 +85,9 @@ def convert_svg_to_png(svg_path, output_pattern, dpi, inkscape_path):
         return ErrorResult()
 
 def batch_convert(svg_folder, output_path, dpi, create_subfolders=True, 
-                  inkscape_path=None, log_callback=None):
+                  inkscape_path=None, log_callback=None, progress_callback=None):
     """
-    Batch convert all SVG files in a folder to PNG
+    Batch convert all SVG files in a folder to PNG with progress reporting
     """
     def log(message):
         if log_callback:
@@ -152,10 +152,18 @@ def batch_convert(svg_folder, output_path, dpi, create_subfolders=True,
     successful = 0
     failed = 0
     
+    # Send initial progress (0%)
+    if progress_callback:
+        progress_callback(0, total_files, "Starting conversion...")
+    
     # Process each SVG file
     for i, svg_file in enumerate(svg_files, 1):
         svg_path = os.path.join(svg_folder, svg_file)
         file_base_name = os.path.splitext(svg_file)[0]
+        
+        # Update progress before starting this file
+        if progress_callback:
+            progress_callback(i-1, total_files, f"Processing: {svg_file}")
         
         if create_subfolders:
             # Create subfolder for each SVG file
@@ -206,6 +214,10 @@ def batch_convert(svg_folder, output_path, dpi, create_subfolders=True,
                 error_msg = result.stderr[:500]
                 log(f"   Error: {error_msg}")
     
+    # Send final progress (100%)
+    if progress_callback:
+        progress_callback(total_files, total_files, "Conversion complete!")
+    
     # Summary
     log("\n" + "="*50)
     log("CONVERSION SUMMARY")
@@ -238,6 +250,11 @@ def batch_convert(svg_folder, output_path, dpi, create_subfolders=True,
     
     return successful > 0
 
+# Function to handle command line interface (backward compatible)
+def batch_convert_cli(svg_folder, output_path, dpi, create_subfolders=True, inkscape_path=None):
+    """CLI wrapper for batch_convert without callbacks"""
+    return batch_convert(svg_folder, output_path, dpi, create_subfolders, inkscape_path)
+
 def convert_from_config(config_file='conversion_config.json'):
     """Convert using configuration from JSON file"""
     try:
@@ -245,7 +262,7 @@ def convert_from_config(config_file='conversion_config.json'):
             config = json.load(f)
         
         # Run conversion
-        return batch_convert(
+        return batch_convert_cli(
             svg_folder=config.get('svg_folder', '.'),
             output_path=config.get('output_path', './png_output'),
             dpi=str(config.get('dpi', '96')),
@@ -283,7 +300,7 @@ def main():
             print("Inkscape Path: " + inkscape_path)
         print("="*50)
         
-        success = batch_convert(svg_folder, output_path, dpi, create_subfolders, inkscape_path)
+        success = batch_convert_cli(svg_folder, output_path, dpi, create_subfolders, inkscape_path)
         
         if success:
             print("\n[OK] Conversion completed successfully!")

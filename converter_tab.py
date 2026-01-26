@@ -10,6 +10,8 @@ class ConverterTab:
         self.parent = parent
         self.shared_vars = shared_vars
         self.gui_app = gui_app
+        self.current_progress = 0
+        self.total_files = 0
         
         # Create tab frame
         self.frame = ttk.Frame(parent)
@@ -177,12 +179,35 @@ class ConverterTab:
         
         # Configure bottom container
         bottom_container.columnconfigure(0, weight=1)
-        bottom_container.rowconfigure(0, weight=1)  # Log area
-        bottom_container.rowconfigure(1, weight=0)  # Buttons
+        bottom_container.rowconfigure(0, weight=1)  # Progress bar area
+        bottom_container.rowconfigure(1, weight=1)  # Log area
+        bottom_container.rowconfigure(2, weight=0)  # Buttons
+        
+        # ====== PROGRESS BAR SECTION ======
+        progress_frame = ttk.LabelFrame(bottom_container, text="Conversion Progress", padding="10")
+        progress_frame.grid(row=0, column=0, sticky='ew', padx=10, pady=(0, 5))
+        
+        # Progress bar
+        self.progress_bar = ttk.Progressbar(progress_frame, mode='determinate', length=100)
+        self.progress_bar.pack(fill='x', expand=True, pady=(0, 5))
+        
+        # Progress labels
+        progress_labels_frame = ttk.Frame(progress_frame)
+        progress_labels_frame.pack(fill='x', expand=True)
+        
+        self.progress_text = ttk.Label(progress_labels_frame, text="Ready to start...")
+        self.progress_text.pack(side='left', anchor='w')
+        
+        self.progress_percentage = ttk.Label(progress_labels_frame, text="0%")
+        self.progress_percentage.pack(side='right', anchor='e')
+        
+        # Progress details
+        self.progress_details = ttk.Label(progress_frame, text="", font=("Arial", 9))
+        self.progress_details.pack(fill='x', expand=True, pady=(2, 0))
         
         # ====== LOG AREA ======
         log_frame = ttk.LabelFrame(bottom_container, text="Conversion Log", padding="10")
-        log_frame.grid(row=0, column=0, sticky='nsew', padx=10, pady=(0, 5))
+        log_frame.grid(row=1, column=0, sticky='nsew', padx=10, pady=(0, 5))
         
         # Configure log frame
         log_frame.columnconfigure(0, weight=1)
@@ -196,7 +221,7 @@ class ConverterTab:
         
         # ====== CONTROL BUTTONS ======
         button_frame = ttk.Frame(bottom_container)
-        button_frame.grid(row=1, column=0, sticky='ew', padx=10, pady=(0, 10))
+        button_frame.grid(row=2, column=0, sticky='ew', padx=10, pady=(0, 10))
         
         # Left side buttons
         left_button_frame = ttk.Frame(button_frame)
@@ -279,7 +304,56 @@ class ConverterTab:
             else:
                 self.gui_app.log_message("No SVG files found in selected folder")
     
+    def update_progress(self, current, total, file_name=None):
+        """Update the progress bar and labels"""
+        percentage = int((current / total) * 100) if total > 0 else 0
+        
+        # Update progress bar
+        self.progress_bar['value'] = percentage
+        
+        # Update percentage label
+        self.progress_percentage.config(text=f"{percentage}%")
+        
+        # Update progress text
+        if file_name:
+            self.progress_text.config(text=f"Processing: {file_name}")
+            self.progress_details.config(text=f"File {current} of {total} - {os.path.basename(file_name)}")
+        else:
+            self.progress_text.config(text=f"Processing file {current} of {total}")
+            self.progress_details.config(text=f"Progress: {current}/{total} files")
+        
+        # Force UI update
+        self.gui_app.root.update_idletasks()
+    
+    def reset_progress(self, total_files):
+        """Reset progress bar for new conversion"""
+        self.total_files = total_files
+        self.current_progress = 0
+        self.progress_bar['value'] = 0
+        self.progress_percentage.config(text="0%")
+        self.progress_text.config(text="Starting conversion...")
+        self.progress_details.config(text=f"Total files to process: {total_files}")
+        self.gui_app.root.update_idletasks()
+    
+    def increment_progress(self, file_name=None):
+        """Increment progress by one file"""
+        self.current_progress += 1
+        self.update_progress(self.current_progress, self.total_files, file_name)
+    
+    def set_progress_complete(self, message="Conversion complete!"):
+        """Set progress bar to complete state"""
+        self.progress_bar['value'] = 100
+        self.progress_percentage.config(text="100%")
+        self.progress_text.config(text=message)
+        self.progress_details.config(text=f"Successfully processed {self.total_files} files")
+    
+    def set_progress_error(self, message="Conversion failed"):
+        """Set progress bar to error state"""
+        self.progress_text.config(text=message, foreground="red")
+        self.progress_details.config(text="Check log for details")
+    
     def clear_log(self):
+        """Clear the log text widget"""
         self.log_text.delete(1.0, tk.END)
     
     def start_conversion(self):
@@ -294,6 +368,18 @@ class ConverterTab:
         if not self.shared_vars['dpi'].get().isdigit():
             messagebox.showerror("Error", "DPI must be a number")
             return
+        
+        # Get total files for progress bar
+        svg_folder = self.shared_vars['svg_folder'].get()
+        svg_files = [f for f in os.listdir(svg_folder) if f.lower().endswith('.svg')] if os.path.exists(svg_folder) else []
+        total_files = len(svg_files)
+        
+        if total_files == 0:
+            messagebox.showerror("Error", "No SVG files found in selected folder")
+            return
+        
+        # Reset progress bar
+        self.reset_progress(total_files)
         
         # Disable button during conversion
         self.convert_btn.config(state='disabled', bg="#6c757d")
@@ -311,19 +397,32 @@ class ConverterTab:
             
             # If conversion successful and auto-merge is checked
             if success and self.shared_vars.get('auto_merge', tk.BooleanVar(value=True)).get():
+                self.gui_app.log_message("\n" + "="*50)
+                self.gui_app.log_message("Starting automatic PDF merge...")
+                self.gui_app.log_message("="*50)
+                
+                # Set progress for PDF merge
+                self.gui_app.root.after(0, lambda: self.progress_text.config(text="Starting PDF merge..."))
+                self.gui_app.root.after(0, lambda: self.progress_details.config(text="Merging PNG files to PDF"))
+                
                 self.trigger_pdf_merge()
             
         except Exception as e:
             self.gui_app.log_message(f"❌ Error: {str(e)}")
+            self.gui_app.root.after(0, lambda: self.set_progress_error(f"Error: {str(e)}"))
             messagebox.showerror("Error", f"An error occurred:\n{str(e)}")
         finally:
             # Re-enable button
             self.gui_app.root.after(0, lambda: self.convert_btn.config(state='normal', bg="#0078D7"))
     
     def run_conversion(self):
-        """Run the SVG to PNG conversion"""
+        """Run the SVG to PNG conversion with real-time progress tracking"""
         try:
-            # Prepare arguments for png.py
+            # Import png module directly
+            sys.path.append('.')  # Add current directory to path
+            import png as png_module
+            
+            # Prepare arguments
             svg_folder = self.shared_vars['svg_folder'].get()
             output_location = self.shared_vars['output_location'].get()
             output_folder = self.shared_vars['output_folder'].get()
@@ -344,58 +443,69 @@ class ConverterTab:
             self.gui_app.log_message(f"Inkscape Path: {inkscape_path}")
             self.gui_app.log_message("="*50)
             
-            # Run png.py as a subprocess
-            png_script = "png.py"
-            if not os.path.exists(png_script):
-                self.gui_app.log_message("❌ Error: png.py not found in current directory!")
-                return False
-            
             # Create output directory
             os.makedirs(complete_output_path, exist_ok=True)
             
-            # Run the conversion with inkscape path as 6th argument
-            create_subfolders_str = "true" if create_subfolders else "false"
+            # Define log callback
+            def log_callback(message):
+                self.gui_app.log_message(message)
             
-            # FIX: Quote ALL paths that might contain spaces
-            # Especially important: Python executable path and png.py path
-            python_exe = sys.executable
-            png_script_path = os.path.abspath(png_script)
+            # Define progress callback
+            def progress_callback(current, total, message):
+                # Calculate percentage
+                percentage = int((current / total) * 100) if total > 0 else 0
+                
+                # Update progress bar - FIXED: use config instead of assignment
+                self.gui_app.root.after(0, lambda p=percentage: self.progress_bar.config(value=p))
+                
+                # Update labels
+                self.gui_app.root.after(0, lambda p=percentage: self.progress_percentage.config(text=f"{p}%"))
+                self.gui_app.root.after(0, lambda m=message: self.progress_text.config(text=m))
+                self.gui_app.root.after(0, lambda c=current, t=total: 
+                                    self.progress_details.config(text=f"File {c} of {t}"))
+                
+                # Force UI update
+                self.gui_app.root.update_idletasks()
             
-            # Build command with proper quoting
-            cmd_parts = [
-                f'"{python_exe}"',          # Python executable (quoted)
-                f'"{png_script_path}"',     # png.py path (quoted)
-                f'"{svg_folder}"',          # SVG folder (quoted - has spaces)
-                f'"{complete_output_path}"', # Output path (quoted)
-                dpi, 
-                create_subfolders_str,
-                f'"{inkscape_path}"'        # Inkscape path (quoted - has spaces)
-            ]
+            # Get SVG files count for progress initialization
+            svg_files = [f for f in os.listdir(svg_folder) if f.lower().endswith('.svg')] if os.path.exists(svg_folder) else []
+            total_files = len(svg_files)
             
-            cmd_string = ' '.join(cmd_parts)
-            self.gui_app.log_message(f"Running command: {cmd_string}")
+            if total_files == 0:
+                self.gui_app.log_message("❌ No SVG files found!")
+                return False
             
-            process = subprocess.Popen(
-                cmd_string,
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-                universal_newlines=True,
-                encoding='utf-8'
+            # Reset progress bar
+            self.gui_app.root.after(0, lambda: self.reset_progress(total_files))
+            
+            # Customize progress bar style for green color
+            style = ttk.Style()
+            style.theme_use('clam')
+            style.configure("green.Horizontal.TProgressbar", 
+                        foreground='#28a745', 
+                        background='#28a745',
+                        troughcolor='#e9ecef',
+                        bordercolor='#e9ecef',
+                        lightcolor='#28a745',
+                        darkcolor='#28a745')
+            
+            # Apply green style to progress bar
+            self.progress_bar.config(style="green.Horizontal.TProgressbar")
+            
+            # Run conversion directly (not as subprocess)
+            success = png_module.batch_convert(
+                svg_folder=svg_folder,
+                output_path=complete_output_path,
+                dpi=dpi,
+                create_subfolders=create_subfolders,
+                inkscape_path=inkscape_path,
+                log_callback=log_callback,
+                progress_callback=progress_callback
             )
             
-            # Read output in real-time
-            for line in process.stdout:
-                clean_line = line.strip()
-                if clean_line:
-                    self.gui_app.log_message(clean_line)
-            
-            process.wait()
-            
-            if process.returncode == 0:
+            if success:
                 self.gui_app.log_message("\n✅ Conversion completed successfully!")
+                self.gui_app.root.after(0, lambda: self.set_progress_complete("Conversion successful!"))
                 
                 # Store the conversion output path for PDF merge
                 self.conversion_output_path = complete_output_path
@@ -411,14 +521,36 @@ class ConverterTab:
                 return True
             else:
                 self.gui_app.log_message("\n❌ Conversion failed!")
-                self.gui_app.log_message(f"Return code: {process.returncode}")
+                self.gui_app.root.after(0, lambda: self.set_progress_error("Conversion failed"))
                 messagebox.showerror("Error", "Conversion failed. Check log for details.")
                 return False
             
         except Exception as e:
             self.gui_app.log_message(f"❌ Error: {str(e)}")
+            import traceback
+            self.gui_app.log_message(f"Traceback: {traceback.format_exc()}")
+            self.gui_app.root.after(0, lambda: self.set_progress_error(f"Error: {str(e)}"))
             messagebox.showerror("Error", f"An error occurred:\n{str(e)}")
             return False
+    
+    
+    
+    def setup_progress_bar_style(self):
+        """Setup the green progress bar style"""
+        style = ttk.Style()
+        style.theme_use('clam')
+        
+        # Create green progress bar style
+        style.configure("green.Horizontal.TProgressbar", 
+                    foreground='#28a745', 
+                    background='#28a745',
+                    troughcolor='#e9ecef',
+                    bordercolor='#e9ecef',
+                    lightcolor='#28a745',
+                    darkcolor='#28a745')
+        
+        # Apply the style
+        self.progress_bar.config(style="green.Horizontal.TProgressbar")
     
     def trigger_pdf_merge(self):
         """Trigger the PDF merge after conversion"""
@@ -427,26 +559,19 @@ class ConverterTab:
                 self.gui_app.log_message("❌ No conversion output path found for PDF merge")
                 return
             
-            self.gui_app.log_message("\n" + "="*50)
-            self.gui_app.log_message("Starting automatic PDF merge...")
-            self.gui_app.log_message("="*50)
-            
             # Get reference to PDF merge tab
             pdf_merge_tab = self.gui_app.pdf_merge_tab
             
-            # IMPORTANT: Set the PNG folder to the converter output
-            # This should be the directory containing the "01" subfolder
+            # Set the PNG folder to the converter output
             pdf_merge_tab.manual_folder_var.set(self.conversion_output_path)
             self.gui_app.log_message(f"📁 PNG folder set to: {self.conversion_output_path}")
             
-            # IMPORTANT: Also update the PDF output location
-            # Create a PDF in the same folder
+            # Update the PDF output location
             pdf_output_path = os.path.join(self.conversion_output_path, "combined_output.pdf")
             pdf_merge_tab.output_location_var.set(self.conversion_output_path)
             pdf_merge_tab.pdf_filename_var.set("combined_output.pdf")
             
             # Trigger a scan of the folder
-            # Need to call scan_folder method on the PDF merge tab
             pdf_merge_tab.scan_folder()
             
             # Wait a moment for UI to update, then start merge
@@ -456,8 +581,3 @@ class ConverterTab:
             self.gui_app.log_message(f"❌ Failed to trigger PDF merge: {str(e)}")
             import traceback
             self.gui_app.log_message(f"Traceback: {traceback.format_exc()}")
-        
-    
-    def clear_log(self):
-        """Clear the log text widget"""
-        self.log_text.delete(1.0, tk.END)
