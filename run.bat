@@ -67,11 +67,26 @@ if %errorlevel% neq 0 (
 )
 echo ✅ Virtual environment activated.
 
-:: Upgrade pip
+:: Check if pip is available
 echo.
-echo Upgrading pip...
-python -m pip install --upgrade pip >nul 2>&1
-echo ✅ pip upgraded.
+echo Checking for pip...
+
+python -m pip --version >nul 2>&1
+IF %ERRORLEVEL% EQU 0 (
+    echo ✅ pip is already installed. Skipping installation.
+) ELSE (
+    echo ❌ pip not found. Installing latest pip...
+    python -m ensurepip --upgrade >nul 2>&1
+
+    :: Verify installation
+    python -m pip --version >nul 2>&1
+    IF %ERRORLEVEL% EQU 0 (
+        echo ✅ pip installed successfully.
+    ) ELSE (
+        echo ⚠️ pip installation failed.
+    )
+)
+
 
 :: Check requirements.txt exists, if not create it
 if not exist "requirements.txt" (
