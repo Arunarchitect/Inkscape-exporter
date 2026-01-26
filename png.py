@@ -13,51 +13,76 @@ def get_svg_files(folder_path):
     return svg_files
 
 def convert_svg_to_png(svg_path, output_pattern, dpi, inkscape_path):
-    """Convert a single SVG file to PNG(s) - Handle multi-page"""
+    """Convert a single SVG file to PNG(s) - WORKING VERSION"""
     # Ensure output directory exists
     output_dir = os.path.dirname(output_pattern)
     os.makedirs(output_dir, exist_ok=True)
     
-    # First, try to get the number of pages
-    print(f"DEBUG: Converting multi-page SVG: {svg_path}")
-    
-    # Create a temporary command to check pages
-    temp_output = os.path.join(output_dir, "temp_page_%d.png")
-    test_cmd = f'"{inkscape_path}" "{svg_path}" --export-type=png --export-page=all --export-dpi={dpi} --export-filename="{temp_output}"'
-    
-    print(f"DEBUG: Testing with --export-page=all: {test_cmd}")
-    result = subprocess.run(test_cmd, shell=True, capture_output=True, text=True, encoding='utf-8')
-    
-    # Check what files were created
-    files_created = []
-    if os.path.exists(output_dir):
-        files_created = [f for f in os.listdir(output_dir) if f.startswith("temp_page_") and f.endswith('.png')]
-    
-    if files_created:
-        print(f"DEBUG: Multi-page export created files: {files_created}")
-        
-        # Rename files to match our pattern
-        base_name = os.path.splitext(os.path.basename(output_pattern))[0]
-        for i, temp_file in enumerate(sorted(files_created), 1):
-            old_path = os.path.join(output_dir, temp_file)
-            new_name = f"{base_name}_p{i}.png" if len(files_created) > 1 else f"{base_name}.png"
-            new_path = os.path.join(output_dir, new_name)
-            
-            try:
-                os.rename(old_path, new_path)
-                print(f"DEBUG: Renamed {temp_file} to {new_name}")
-            except Exception as e:
-                print(f"DEBUG: Error renaming {temp_file}: {e}")
-        
-        return result
+    # Get base name for output (without directory)
+    if output_pattern.endswith('.png'):
+        base_name = os.path.basename(output_pattern[:-4])  # Remove .png and path
     else:
-        print(f"DEBUG: Multi-page export failed, trying single page")
+        base_name = os.path.basename(output_pattern)
+    
+    # List to track created files
+    files_created = []
+    
+    # IMPORTANT: Change to output directory before running commands
+    original_dir = os.getcwd()
+    os.chdir(output_dir)
+    
+    try:
+        # COMMAND 1: Export page 1 (without --export-page)
+        output_file_1 = f"{base_name}.png"
+        cmd1 = f'"{inkscape_path}" "{svg_path}" --export-type=png --export-dpi={dpi} --export-filename="{output_file_1}"'
         
-        # Try single page export
-        single_cmd = f'"{inkscape_path}" "{svg_path}" --export-type=png --export-dpi={dpi} --export-filename="{output_pattern}"'
-        print(f"DEBUG: Falling back to single page: {single_cmd}")
+        result1 = subprocess.run(cmd1, shell=True, capture_output=True, text=True, encoding='utf-8')
         
-        return subprocess.run(single_cmd, shell=True, capture_output=True, text=True, encoding='utf-8')
+        if os.path.exists(output_file_1):
+            files_created.append(output_file_1)
+        else:
+            # Try with --export-page=1 if basic export fails
+            cmd1b = f'"{inkscape_path}" "{svg_path}" --export-type=png --export-page=1 --export-dpi={dpi} --export-filename="{output_file_1}"'
+            result1b = subprocess.run(cmd1b, shell=True, capture_output=True, text=True, encoding='utf-8')
+            
+            if os.path.exists(output_file_1):
+                files_created.append(output_file_1)
+        
+        # COMMAND 2-5: Export additional pages
+        for page_num in range(2, 6):
+            output_file = f"{base_name}_p{page_num}.png"
+            cmd = f'"{inkscape_path}" "{svg_path}" --export-type=png --export-page={page_num} --export-dpi={dpi} --export-filename="{output_file}"'
+            
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, encoding='utf-8')
+            
+            if os.path.exists(output_file):
+                files_created.append(output_file)
+            else:
+                # Stop if this page doesn't exist
+                break
+    
+    finally:
+        # Change back to original directory
+        os.chdir(original_dir)
+    
+    # Create result object
+    if files_created:
+        # Success result
+        class SuccessResult:
+            def __init__(self, files):
+                self.returncode = 0
+                self.stdout = f"Created {len(files)} PNG file(s)"
+                self.stderr = ""
+                self.files_created = files
+        return SuccessResult(files_created)
+    else:
+        # Error result
+        class ErrorResult:
+            def __init__(self):
+                self.returncode = 1
+                self.stdout = ""
+                self.stderr = "Failed to create any PNG files"
+        return ErrorResult()
 
 def batch_convert(svg_folder, output_path, dpi, create_subfolders=True, 
                   inkscape_path=None, log_callback=None):
@@ -146,37 +171,34 @@ def batch_convert(svg_folder, output_path, dpi, create_subfolders=True,
             target_dir = output_dir
         
         log(f"\n[{i}/{total_files}] Processing: {svg_file}")
-        log(f"[INFO] Output pattern: {output_pattern}")
         
         result = convert_svg_to_png(svg_path, output_pattern, dpi, inkscape_path)
         
         if result.returncode == 0:
             successful += 1
             
-            # Check what files were actually created
-            if os.path.exists(target_dir):
-                # List ALL PNG files in target directory
-                all_pngs = [f for f in os.listdir(target_dir) if f.lower().endswith('.png')]
-                
-                # Filter to files starting with our base name
-                base_pngs = [f for f in all_pngs if f.startswith(file_base_name)]
-                
-                if base_pngs:
-                    log(f"[OK] Success! Created {len(base_pngs)} PNG files:")
-                    for png in sorted(base_pngs):
-                        file_size = os.path.getsize(os.path.join(target_dir, png))
-                        log(f"      -> {png} ({file_size} bytes)")
-                else:
-                    # Check for any PNGs at all
-                    if all_pngs:
-                        log(f"[INFO] Created PNG files (different naming):")
-                        for png in sorted(all_pngs):
-                            file_size = os.path.getsize(os.path.join(target_dir, png))
-                            log(f"      -> {png} ({file_size} bytes)")
-                    else:
-                        log(f"[WARNING] No PNG files generated for {svg_file}")
+            # Get list of created files
+            if hasattr(result, 'files_created'):
+                # New format: result has files_created attribute
+                png_files = result.files_created
             else:
-                log(f"[ERROR] Target directory doesn't exist: {target_dir}")
+                # Old format: list directory
+                if os.path.exists(target_dir):
+                    png_files = [f for f in os.listdir(target_dir) if f.lower().endswith('.png')]
+                else:
+                    png_files = []
+            
+            if png_files:
+                log(f"[OK] Success! Created {len(png_files)} PNG files:")
+                for png in sorted(png_files):
+                    file_path = os.path.join(target_dir, png)
+                    if os.path.exists(file_path):
+                        file_size = os.path.getsize(file_path)
+                        log(f"      -> {png} ({file_size} bytes)")
+                    else:
+                        log(f"      -> {png}")
+            else:
+                log(f"[WARNING] No PNG files generated for {svg_file}")
         else:
             failed += 1
             log(f"[ERROR] Failed to process {svg_file}")
