@@ -152,8 +152,9 @@ class ConverterTab:
         options_frame = ttk.Frame(conv_frame)
         options_frame.grid(row=2, column=0, columnspan=2, sticky='w', pady=(0, 5))
         
-        # ADD THIS NEW CHECKBOX
-        self.shared_vars['auto_merge'] = tk.BooleanVar(value=True)  # Checked by default
+        # Add auto-merge checkbox
+        if 'auto_merge' not in self.shared_vars:
+            self.shared_vars['auto_merge'] = tk.BooleanVar(value=True)
         
         ttk.Checkbutton(options_frame, text="Merge to PDF automatically after conversion", 
                        variable=self.shared_vars['auto_merge']).pack(anchor='w', pady=2)
@@ -309,7 +310,7 @@ class ConverterTab:
             success = self.run_conversion()
             
             # If conversion successful and auto-merge is checked
-            if success and self.shared_vars['auto_merge'].get():
+            if success and self.shared_vars.get('auto_merge', tk.BooleanVar(value=True)).get():
                 self.trigger_pdf_merge()
             
         except Exception as e:
@@ -354,18 +355,29 @@ class ConverterTab:
             
             # Run the conversion with inkscape path as 6th argument
             create_subfolders_str = "true" if create_subfolders else "false"
-            cmd = [
-                sys.executable, 
-                png_script, 
-                svg_folder, 
-                complete_output_path, 
+            
+            # FIX: Quote ALL paths that might contain spaces
+            # Especially important: Python executable path and png.py path
+            python_exe = sys.executable
+            png_script_path = os.path.abspath(png_script)
+            
+            # Build command with proper quoting
+            cmd_parts = [
+                f'"{python_exe}"',          # Python executable (quoted)
+                f'"{png_script_path}"',     # png.py path (quoted)
+                f'"{svg_folder}"',          # SVG folder (quoted - has spaces)
+                f'"{complete_output_path}"', # Output path (quoted)
                 dpi, 
                 create_subfolders_str,
-                inkscape_path  # <-- Pass inkscape path as 6th argument
+                f'"{inkscape_path}"'        # Inkscape path (quoted - has spaces)
             ]
             
+            cmd_string = ' '.join(cmd_parts)
+            self.gui_app.log_message(f"Running command: {cmd_string}")
+            
             process = subprocess.Popen(
-                cmd,
+                cmd_string,
+                shell=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -389,7 +401,7 @@ class ConverterTab:
                 self.conversion_output_path = complete_output_path
                 
                 # Open output folder if option is selected (but not if auto-merge is on)
-                if open_output and os.path.exists(complete_output_path) and not self.shared_vars['auto_merge'].get():
+                if open_output and os.path.exists(complete_output_path) and not self.shared_vars.get('auto_merge', tk.BooleanVar(value=True)).get():
                     try:
                         os.startfile(complete_output_path)
                         self.gui_app.log_message(f"📂 Opened output folder: {complete_output_path}")
@@ -399,6 +411,7 @@ class ConverterTab:
                 return True
             else:
                 self.gui_app.log_message("\n❌ Conversion failed!")
+                self.gui_app.log_message(f"Return code: {process.returncode}")
                 messagebox.showerror("Error", "Conversion failed. Check log for details.")
                 return False
             
@@ -410,6 +423,10 @@ class ConverterTab:
     def trigger_pdf_merge(self):
         """Trigger the PDF merge after conversion"""
         try:
+            if not hasattr(self, 'conversion_output_path'):
+                self.gui_app.log_message("❌ No conversion output path found for PDF merge")
+                return
+            
             self.gui_app.log_message("\n" + "="*50)
             self.gui_app.log_message("Starting automatic PDF merge...")
             self.gui_app.log_message("="*50)
@@ -417,23 +434,30 @@ class ConverterTab:
             # Get reference to PDF merge tab
             pdf_merge_tab = self.gui_app.pdf_merge_tab
             
-            # Set the PNG folder to the converter output
-            if hasattr(self, 'conversion_output_path'):
-                pdf_merge_tab.manual_folder_var.set(self.conversion_output_path)
-                self.gui_app.log_message(f"📁 PNG folder set to: {self.conversion_output_path}")
+            # IMPORTANT: Set the PNG folder to the converter output
+            # This should be the directory containing the "01" subfolder
+            pdf_merge_tab.manual_folder_var.set(self.conversion_output_path)
+            self.gui_app.log_message(f"📁 PNG folder set to: {self.conversion_output_path}")
             
-            # Set output PDF to be in the same location with default name
-            output_pdf = os.path.join(self.conversion_output_path, "combined_output.pdf")
+            # IMPORTANT: Also update the PDF output location
+            # Create a PDF in the same folder
+            pdf_output_path = os.path.join(self.conversion_output_path, "combined_output.pdf")
             pdf_merge_tab.output_location_var.set(self.conversion_output_path)
-            
-            # Set PDF filename
             pdf_merge_tab.pdf_filename_var.set("combined_output.pdf")
             
-            # Scan the folder
+            # Trigger a scan of the folder
+            # Need to call scan_folder method on the PDF merge tab
             pdf_merge_tab.scan_folder()
             
-            # Trigger the merge
-            self.gui_app.root.after(100, pdf_merge_tab.start_merge)
+            # Wait a moment for UI to update, then start merge
+            self.gui_app.root.after(1000, pdf_merge_tab.start_merge)
             
         except Exception as e:
             self.gui_app.log_message(f"❌ Failed to trigger PDF merge: {str(e)}")
+            import traceback
+            self.gui_app.log_message(f"Traceback: {traceback.format_exc()}")
+        
+    
+    def clear_log(self):
+        """Clear the log text widget"""
+        self.log_text.delete(1.0, tk.END)

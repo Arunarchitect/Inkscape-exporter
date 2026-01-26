@@ -13,42 +13,86 @@ def get_svg_files(folder_path):
     return svg_files
 
 def convert_svg_to_png(svg_path, output_pattern, dpi, inkscape_path):
-    """Convert a single SVG file to PNG(s)"""
-    cmd = [
-        inkscape_path,
-        svg_path,
-        "--export-type=png",
-        "--export-page=all",
-        f"--export-dpi={dpi}",
-        f"--export-filename={output_pattern}"
-    ]
+    """Convert a single SVG file to PNG(s) - Handle multi-page"""
+    # Ensure output directory exists
+    output_dir = os.path.dirname(output_pattern)
+    os.makedirs(output_dir, exist_ok=True)
     
-    result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8')
-    return result
+    # First, try to get the number of pages
+    print(f"DEBUG: Converting multi-page SVG: {svg_path}")
+    
+    # Create a temporary command to check pages
+    temp_output = os.path.join(output_dir, "temp_page_%d.png")
+    test_cmd = f'"{inkscape_path}" "{svg_path}" --export-type=png --export-page=all --export-dpi={dpi} --export-filename="{temp_output}"'
+    
+    print(f"DEBUG: Testing with --export-page=all: {test_cmd}")
+    result = subprocess.run(test_cmd, shell=True, capture_output=True, text=True, encoding='utf-8')
+    
+    # Check what files were created
+    files_created = []
+    if os.path.exists(output_dir):
+        files_created = [f for f in os.listdir(output_dir) if f.startswith("temp_page_") and f.endswith('.png')]
+    
+    if files_created:
+        print(f"DEBUG: Multi-page export created files: {files_created}")
+        
+        # Rename files to match our pattern
+        base_name = os.path.splitext(os.path.basename(output_pattern))[0]
+        for i, temp_file in enumerate(sorted(files_created), 1):
+            old_path = os.path.join(output_dir, temp_file)
+            new_name = f"{base_name}_p{i}.png" if len(files_created) > 1 else f"{base_name}.png"
+            new_path = os.path.join(output_dir, new_name)
+            
+            try:
+                os.rename(old_path, new_path)
+                print(f"DEBUG: Renamed {temp_file} to {new_name}")
+            except Exception as e:
+                print(f"DEBUG: Error renaming {temp_file}: {e}")
+        
+        return result
+    else:
+        print(f"DEBUG: Multi-page export failed, trying single page")
+        
+        # Try single page export
+        single_cmd = f'"{inkscape_path}" "{svg_path}" --export-type=png --export-dpi={dpi} --export-filename="{output_pattern}"'
+        print(f"DEBUG: Falling back to single page: {single_cmd}")
+        
+        return subprocess.run(single_cmd, shell=True, capture_output=True, text=True, encoding='utf-8')
 
 def batch_convert(svg_folder, output_path, dpi, create_subfolders=True, 
                   inkscape_path=None, log_callback=None):
     """
     Batch convert all SVG files in a folder to PNG
-    
-    Args:
-        svg_folder: Folder containing SVG files
-        output_path: Complete output path (including folder name)
-        dpi: DPI quality
-        create_subfolders: If True, create subfolder for each SVG
-        inkscape_path: Custom Inkscape executable path
-        log_callback: Function to call for logging messages
     """
     def log(message):
         if log_callback:
             log_callback(message)
         else:
             # Remove or replace emojis for Windows console compatibility
-            clean_message = message.replace('📁', '[FOLDER]').replace('🎯', '[TARGET]')
-            clean_message = clean_message.replace('📊', '[STATS]').replace('✅', '[OK]')
-            clean_message = clean_message.replace('❌', '[ERROR]').replace('⚠️', '[WARNING]')
-            clean_message = clean_message.replace('📂', '[FOLDER]')
-            print(clean_message)
+            clean_message = message
+            # Replace all Unicode symbols with ASCII equivalents
+            replacements = {
+                '📁': '[FOLDER]',
+                '🎯': '[TARGET]', 
+                '📊': '[STATS]',
+                '✅': '[OK]',
+                '❌': '[ERROR]',
+                '⚠️': '[WARNING]',
+                '📂': '[FOLDER]',
+                '→': '->',  # Replace arrow with ASCII arrow
+                '🖼️': '[IMAGE]'
+            }
+            
+            for unicode_char, ascii_char in replacements.items():
+                clean_message = clean_message.replace(unicode_char, ascii_char)
+            
+            # Safe print for Windows console
+            try:
+                print(clean_message)
+            except UnicodeEncodeError:
+                # If still fails, remove all non-ASCII
+                safe_message = clean_message.encode('ascii', 'ignore').decode('ascii')
+                print(safe_message)
     
     # Default Inkscape path if not provided
     if not inkscape_path:
@@ -86,43 +130,58 @@ def batch_convert(svg_folder, output_path, dpi, create_subfolders=True,
     # Process each SVG file
     for i, svg_file in enumerate(svg_files, 1):
         svg_path = os.path.join(svg_folder, svg_file)
+        file_base_name = os.path.splitext(svg_file)[0]
         
         if create_subfolders:
             # Create subfolder for each SVG file
-            file_base_name = os.path.splitext(svg_file)[0]
             file_output_dir = os.path.join(output_dir, file_base_name)
             os.makedirs(file_output_dir, exist_ok=True)
-            output_pattern = os.path.join(file_output_dir, "page.png")
+            # Output pattern: use SVG filename as base
+            output_pattern = os.path.join(file_output_dir, f"{file_base_name}.png")
+            target_dir = file_output_dir
         else:
             # All PNGs in same folder
-            file_base_name = os.path.splitext(svg_file)[0]
-            output_pattern = os.path.join(output_dir, f"{file_base_name}_page.png")
+            # Output pattern: use SVG filename as base
+            output_pattern = os.path.join(output_dir, f"{file_base_name}.png")
+            target_dir = output_dir
         
         log(f"\n[{i}/{total_files}] Processing: {svg_file}")
+        log(f"[INFO] Output pattern: {output_pattern}")
         
         result = convert_svg_to_png(svg_path, output_pattern, dpi, inkscape_path)
         
         if result.returncode == 0:
             successful += 1
             
-            # Count exported PNGs
-            if create_subfolders:
-                exported = [f for f in os.listdir(file_output_dir) if f.endswith('.png')]
-                log_location = file_output_dir
+            # Check what files were actually created
+            if os.path.exists(target_dir):
+                # List ALL PNG files in target directory
+                all_pngs = [f for f in os.listdir(target_dir) if f.lower().endswith('.png')]
+                
+                # Filter to files starting with our base name
+                base_pngs = [f for f in all_pngs if f.startswith(file_base_name)]
+                
+                if base_pngs:
+                    log(f"[OK] Success! Created {len(base_pngs)} PNG files:")
+                    for png in sorted(base_pngs):
+                        file_size = os.path.getsize(os.path.join(target_dir, png))
+                        log(f"      -> {png} ({file_size} bytes)")
+                else:
+                    # Check for any PNGs at all
+                    if all_pngs:
+                        log(f"[INFO] Created PNG files (different naming):")
+                        for png in sorted(all_pngs):
+                            file_size = os.path.getsize(os.path.join(target_dir, png))
+                            log(f"      -> {png} ({file_size} bytes)")
+                    else:
+                        log(f"[WARNING] No PNG files generated for {svg_file}")
             else:
-                exported = [f for f in os.listdir(output_dir) 
-                          if f.startswith(file_base_name) and f.endswith('.png')]
-                log_location = output_dir
-            
-            if exported:
-                log(f"[OK] Success! Exported {len(exported)} PNG files to: {log_location}")
-            else:
-                log(f"[WARNING] No PNG files generated for {svg_file}")
+                log(f"[ERROR] Target directory doesn't exist: {target_dir}")
         else:
             failed += 1
             log(f"[ERROR] Failed to process {svg_file}")
             if result.stderr:
-                error_msg = result.stderr[:200]
+                error_msg = result.stderr[:500]
                 log(f"   Error: {error_msg}")
     
     # Summary
@@ -134,14 +193,23 @@ def batch_convert(svg_folder, output_path, dpi, create_subfolders=True,
     log(f"[ERROR] Failed conversions: {failed}")
     log(f"[FOLDER] Output location: {output_dir}")
     
-    # Count total PNG files created
+    # Count total PNG files created (walk through all directories)
     total_pngs = 0
     if create_subfolders:
         for root, dirs, files in os.walk(output_dir):
             pngs = [f for f in files if f.lower().endswith('.png')]
             total_pngs += len(pngs)
+            if pngs:
+                log(f"[INFO] In {root}: {len(pngs)} PNG files")
+                for png in sorted(pngs):
+                    log(f"      {png}")
     else:
-        total_pngs = len([f for f in os.listdir(output_dir) if f.lower().endswith('.png')])
+        pngs = [f for f in os.listdir(output_dir) if f.lower().endswith('.png')]
+        total_pngs = len(pngs)
+        if pngs:
+            log(f"[INFO] PNG files in output directory:")
+            for png in sorted(pngs):
+                log(f"      {png}")
     
     log(f"[STATS] Total PNG files created: {total_pngs}")
     log("="*50)
@@ -183,6 +251,7 @@ def main():
         if len(sys.argv) >= 6:
             inkscape_path = sys.argv[5]
         
+        # Use ASCII-safe printing for command line
         print("Command line conversion:")
         print("SVG Folder: " + svg_folder)
         print("Output Path: " + output_path)
