@@ -3,6 +3,11 @@ import os
 import sys
 import json
 from pathlib import Path
+import tempfile
+import xml.etree.ElementTree as ET
+
+# Global variable for log callback
+global_log_callback = None
 
 def get_svg_files(folder_path):
     """Get all SVG files from folder, sorted alphabetically"""
@@ -12,29 +17,202 @@ def get_svg_files(folder_path):
             svg_files.append(file)
     return svg_files
 
-def convert_svg_to_png(svg_path, output_pattern, dpi, inkscape_path):
-    """Convert a single SVG file to PNG(s) - WORKING VERSION"""
+def parse_svg_layers(svg_content):
+    """Parse SVG to extract layer information"""
+    namespaces = {
+        'svg': 'http://www.w3.org/2000/svg',
+        'inkscape': 'http://www.inkscape.org/namespaces/inkscape'
+    }
+    
+    try:
+        root = ET.fromstring(svg_content)
+        
+        # Find all groups with inkscape:groupmode="layer"
+        layers = {}
+        for elem in root.iter():
+            # Check for Inkscape layers
+            groupmode = elem.get('{http://www.inkscape.org/namespaces/inkscape}groupmode')
+            label = elem.get('{http://www.inkscape.org/namespaces/inkscape}label')
+            
+            if groupmode == 'layer' and label:
+                layer_id = elem.get('id', '')
+                layers[label] = {
+                    'id': layer_id,
+                    'elem': elem,
+                    'style': elem.get('style', '')
+                }
+        
+        return layers
+    except Exception as e:
+        if global_log_callback:
+            global_log_callback(f"Warning: Could not parse SVG layers: {e}")
+        else:
+            print(f"Warning: Could not parse SVG layers: {e}")
+        return {}
+
+def apply_layer_visibility(svg_content, layer_rules, filename=None):
+    """Apply visibility rules to SVG layers"""
+    if not layer_rules:
+        return svg_content
+    
+    try:
+        # Parse SVG
+        namespaces = {
+            'svg': 'http://www.w3.org/2000/svg',
+            'inkscape': 'http://www.inkscape.org/namespaces/inkscape'
+        }
+        
+        root = ET.fromstring(svg_content)
+        
+        # Check both global rules and filename-specific rules
+        applicable_rules = {}
+        
+        # Add global rules
+        if 'global' in layer_rules:
+            applicable_rules.update(layer_rules['global'])
+        
+        # Add filename-specific rules
+        if filename:
+            # Try exact match first
+            if filename in layer_rules:
+                applicable_rules.update(layer_rules[filename])
+            
+            # Try without extension
+            basename = os.path.splitext(filename)[0]
+            if basename in layer_rules:
+                applicable_rules.update(layer_rules[basename])
+        
+        if not applicable_rules:
+            return svg_content
+        
+        # Apply rules to layers
+        layers_modified = 0
+        for elem in root.iter():
+            # Check if this is a layer
+            groupmode = elem.get('{http://www.inkscape.org/namespaces/inkscape}groupmode')
+            label = elem.get('{http://www.inkscape.org/namespaces/inkscape}label')
+            elem_id = elem.get('id', '')
+            
+            # Check by label (preferred) or by ID
+            layer_key = None
+            if label and label in applicable_rules:
+                layer_key = label
+            elif elem_id in applicable_rules:
+                layer_key = elem_id
+            
+            if layer_key and groupmode == 'layer':
+                action = applicable_rules[layer_key]
+                
+                # Get current style
+                current_style = elem.get('style', '')
+                
+                # Parse style attributes
+                style_parts = {}
+                if current_style:
+                    for part in current_style.split(';'):
+                        if ':' in part:
+                            key, value = part.split(':', 1)
+                            style_parts[key.strip()] = value.strip()
+                
+                # Set visibility
+                if action == 'hide':
+                    style_parts['display'] = 'none'
+                elif action == 'show':
+                    # Remove display:none if present
+                    if 'display' in style_parts and style_parts['display'] == 'none':
+                        del style_parts['display']
+                
+                # Rebuild style string
+                new_style = ';'.join([f"{k}:{v}" for k, v in style_parts.items()])
+                elem.set('style', new_style)
+                
+                layers_modified += 1
+                if global_log_callback:
+                    global_log_callback(f"  Applied {action} to layer: {layer_key}")
+                else:
+                    print(f"  Applied {action} to layer: {layer_key}")
+        
+        if layers_modified > 0:
+            if global_log_callback:
+                global_log_callback(f"  Modified {layers_modified} layers")
+            else:
+                print(f"  Modified {layers_modified} layers")
+            return ET.tostring(root, encoding='unicode')
+        else:
+            return svg_content
+            
+    except Exception as e:
+        if global_log_callback:
+            global_log_callback(f"Warning: Error applying layer rules: {e}")
+        else:
+            print(f"Warning: Error applying layer rules: {e}")
+        return svg_content
+
+def convert_svg_to_png(svg_path, output_pattern, dpi, inkscape_path, layer_rules=None):
+    """Convert a single SVG file to PNG(s) with optional layer control"""
+    # Use global log_callback
+    global global_log_callback
+    
     # Ensure output directory exists
     output_dir = os.path.dirname(output_pattern)
     os.makedirs(output_dir, exist_ok=True)
     
-    # Get base name for output (without directory)
+    # Get base name for output
     if output_pattern.endswith('.png'):
-        base_name = os.path.basename(output_pattern[:-4])  # Remove .png and path
+        base_name = os.path.basename(output_pattern[:-4])
     else:
         base_name = os.path.basename(output_pattern)
+    
+    # Get SVG filename for layer rule matching
+    svg_filename = os.path.basename(svg_path)
+    
+    # Check if layer control is needed
+    if layer_rules:
+        try:
+            # Read SVG content
+            with open(svg_path, 'r', encoding='utf-8') as f:
+                svg_content = f.read()
+            
+            # Apply layer visibility rules
+            if global_log_callback:
+                global_log_callback(f"  Applying layer rules to: {svg_filename}")
+            else:
+                print(f"  Applying layer rules to: {svg_filename}")
+            
+            svg_content = apply_layer_visibility(svg_content, layer_rules, svg_filename)
+            
+            # Create temporary SVG file with modified layers
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.svg', delete=False, encoding='utf-8') as temp_svg:
+                temp_svg.write(svg_content)
+                temp_svg_path = temp_svg.name
+            
+            # Clean up flag
+            cleanup_temp = True
+            
+        except Exception as e:
+            if global_log_callback:
+                global_log_callback(f"Warning: Could not apply layer rules ({e}), using original file")
+            else:
+                print(f"Warning: Could not apply layer rules ({e}), using original file")
+            temp_svg_path = svg_path
+            cleanup_temp = False
+    else:
+        # No layer control needed
+        temp_svg_path = svg_path
+        cleanup_temp = False
     
     # List to track created files
     files_created = []
     
-    # IMPORTANT: Change to output directory before running commands
+    # Change to output directory before running commands
     original_dir = os.getcwd()
     os.chdir(output_dir)
     
     try:
-        # COMMAND 1: Export page 1 (without --export-page)
+        # Convert using the temporary/modified SVG
+        # COMMAND 1: Export page 1
         output_file_1 = f"{base_name}.png"
-        cmd1 = f'"{inkscape_path}" "{svg_path}" --export-type=png --export-dpi={dpi} --export-filename="{output_file_1}"'
+        cmd1 = f'"{inkscape_path}" "{temp_svg_path}" --export-type=png --export-dpi={dpi} --export-filename="{output_file_1}"'
         
         result1 = subprocess.run(cmd1, shell=True, capture_output=True, text=True, encoding='utf-8')
         
@@ -42,7 +220,7 @@ def convert_svg_to_png(svg_path, output_pattern, dpi, inkscape_path):
             files_created.append(output_file_1)
         else:
             # Try with --export-page=1 if basic export fails
-            cmd1b = f'"{inkscape_path}" "{svg_path}" --export-type=png --export-page=1 --export-dpi={dpi} --export-filename="{output_file_1}"'
+            cmd1b = f'"{inkscape_path}" "{temp_svg_path}" --export-type=png --export-page=1 --export-dpi={dpi} --export-filename="{output_file_1}"'
             result1b = subprocess.run(cmd1b, shell=True, capture_output=True, text=True, encoding='utf-8')
             
             if os.path.exists(output_file_1):
@@ -51,7 +229,7 @@ def convert_svg_to_png(svg_path, output_pattern, dpi, inkscape_path):
         # COMMAND 2-5: Export additional pages
         for page_num in range(2, 6):
             output_file = f"{base_name}_p{page_num}.png"
-            cmd = f'"{inkscape_path}" "{svg_path}" --export-type=png --export-page={page_num} --export-dpi={dpi} --export-filename="{output_file}"'
+            cmd = f'"{inkscape_path}" "{temp_svg_path}" --export-type=png --export-page={page_num} --export-dpi={dpi} --export-filename="{output_file}"'
             
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True, encoding='utf-8')
             
@@ -64,6 +242,13 @@ def convert_svg_to_png(svg_path, output_pattern, dpi, inkscape_path):
     finally:
         # Change back to original directory
         os.chdir(original_dir)
+        
+        # Clean up temporary file if created
+        if cleanup_temp and os.path.exists(temp_svg_path):
+            try:
+                os.unlink(temp_svg_path)
+            except:
+                pass
     
     # Create result object
     if files_created:
@@ -85,10 +270,15 @@ def convert_svg_to_png(svg_path, output_pattern, dpi, inkscape_path):
         return ErrorResult()
 
 def batch_convert(svg_folder, output_path, dpi, create_subfolders=True, 
-                  inkscape_path=None, log_callback=None, progress_callback=None):
+                  inkscape_path=None, log_callback=None, progress_callback=None,
+                  layer_rules=None):
     """
     Batch convert all SVG files in a folder to PNG with progress reporting
     """
+    # Store log_callback in global variable for use in other functions
+    global global_log_callback
+    global_log_callback = log_callback
+    
     def log(message):
         if log_callback:
             log_callback(message)
@@ -148,6 +338,10 @@ def batch_convert(svg_folder, output_path, dpi, create_subfolders=True,
     log(f"[INKSCAPE] Using: {inkscape_path}")
     log(f"[OPTION] Create subfolders: {create_subfolders}")
     
+    if layer_rules:
+        rule_count = sum(len(rules) for rules in layer_rules.values())
+        log(f"[LAYER CONTROL] Enabled with {rule_count} rule(s)")
+    
     total_files = len(svg_files)
     successful = 0
     failed = 0
@@ -180,7 +374,7 @@ def batch_convert(svg_folder, output_path, dpi, create_subfolders=True,
         
         log(f"\n[{i}/{total_files}] Processing: {svg_file}")
         
-        result = convert_svg_to_png(svg_path, output_pattern, dpi, inkscape_path)
+        result = convert_svg_to_png(svg_path, output_pattern, dpi, inkscape_path, layer_rules)
         
         if result.returncode == 0:
             successful += 1

@@ -13,6 +13,18 @@ class ConverterTab:
         self.current_progress = 0
         self.total_files = 0
         
+        # Add layer control variables
+        if 'layer_control_enabled' not in self.shared_vars:
+            self.shared_vars['layer_control_enabled'] = tk.BooleanVar(value=False)
+        if 'layer_csv_path' not in self.shared_vars:
+            self.shared_vars['layer_csv_path'] = tk.StringVar()
+        if 'layer_text_content' not in self.shared_vars:
+            self.shared_vars['layer_text_content'] = tk.StringVar()
+        if 'layer_control_mode' not in self.shared_vars:
+            self.shared_vars['layer_control_mode'] = tk.StringVar(value='csv')  # 'csv' or 'text'
+        if 'layer_rules' not in self.shared_vars:
+            self.shared_vars['layer_rules'] = None
+        
         # Create tab frame
         self.frame = ttk.Frame(parent)
         self.setup_ui()
@@ -170,6 +182,82 @@ class ConverterTab:
         # Configure grid weights
         conv_frame.columnconfigure(0, weight=1)
         
+        # ====== LAYER CONTROL SECTION ======
+        layer_frame = ttk.LabelFrame(content, text="Layer Visibility Control", padding="10")
+        layer_frame.pack(fill='x', padx=10, pady=5)
+        
+        # Enable layer control checkbox
+        ttk.Checkbutton(layer_frame, text="Enable layer visibility control",
+                       variable=self.shared_vars['layer_control_enabled'],
+                       command=self.toggle_layer_controls).pack(anchor='w', pady=(0, 10))
+        
+        # Mode selection (CSV or Text)
+        mode_frame = ttk.Frame(layer_frame)
+        mode_frame.pack(fill='x', pady=(0, 10))
+        
+        ttk.Label(mode_frame, text="Input Mode:").pack(side='left', padx=(0, 10))
+        
+        ttk.Radiobutton(mode_frame, text="CSV File", 
+                       variable=self.shared_vars['layer_control_mode'],
+                       value='csv', command=self.toggle_layer_input_mode).pack(side='left', padx=(0, 10))
+        
+        ttk.Radiobutton(mode_frame, text="Text Input", 
+                       variable=self.shared_vars['layer_control_mode'],
+                       value='text', command=self.toggle_layer_input_mode).pack(side='left')
+        
+        # CSV File Input
+        self.csv_frame = ttk.Frame(layer_frame)
+        
+        csv_label = ttk.Label(self.csv_frame, text="Layer Control CSV:")
+        csv_label.grid(row=0, column=0, sticky='w', pady=(0, 5), columnspan=2)
+        
+        csv_entry_frame = ttk.Frame(self.csv_frame)
+        csv_entry_frame.grid(row=1, column=0, columnspan=2, sticky='ew', pady=(0, 5))
+        
+        self.csv_entry = ttk.Entry(csv_entry_frame, textvariable=self.shared_vars['layer_csv_path'])
+        self.csv_entry.pack(side='left', fill='x', expand=True, padx=(0, 10))
+        
+        ttk.Button(csv_entry_frame, text="Browse", 
+                  command=self.browse_layer_csv, width=10).pack(side='right')
+        
+        # CSV instructions
+        csv_help = "CSV Format: layer_name,visibility (show/hide),svg_filename(optional)"
+        ttk.Label(self.csv_frame, text=csv_help, font=("Arial", 8), foreground="gray").grid(
+            row=2, column=0, columnspan=2, sticky='w', pady=(0, 5))
+        
+        # Text Input
+        self.text_frame = ttk.Frame(layer_frame)
+        
+        text_label = ttk.Label(self.text_frame, text="Layer Control Text:")
+        text_label.grid(row=0, column=0, sticky='w', pady=(0, 5))
+        
+        # Text input area
+        self.layer_text = scrolledtext.ScrolledText(self.text_frame, height=8, wrap=tk.WORD)
+        self.layer_text.grid(row=1, column=0, sticky='nsew', pady=(0, 5))
+        
+        # Text input instructions
+        text_help = """Enter layer visibility rules (one per line):
+Format: layer_name:show/hide [for:filename.svg]
+Examples:
+  background:hide
+  text_layer:show
+  watermark:hide for:logo.svg
+  foreground:show for:special_design.svg"""
+        
+        ttk.Label(self.text_frame, text=text_help, font=("Arial", 8), foreground="gray").grid(
+            row=2, column=0, sticky='w')
+        
+        # Configure grid weights
+        self.text_frame.columnconfigure(0, weight=1)
+        self.text_frame.rowconfigure(1, weight=1)
+        
+        # Initialize visibility
+        self.toggle_layer_controls()
+        self.toggle_layer_input_mode()
+        
+        # Configure grid weights for layer frame
+        layer_frame.columnconfigure(0, weight=1)
+        
         # Add padding at the bottom of scrollable content
         ttk.Frame(content, height=10).pack()
         
@@ -250,6 +338,128 @@ class ConverterTab:
                  bg="#f0f0f0", fg="black",
                  font=("Arial", 9),
                  padx=15, pady=8).pack(side='right')
+    
+    def toggle_layer_controls(self):
+        """Toggle layer control section visibility"""
+        enabled = self.shared_vars['layer_control_enabled'].get()
+        
+        if enabled:
+            self.toggle_layer_input_mode()
+        else:
+            self.csv_frame.pack_forget()
+            self.text_frame.pack_forget()
+    
+    def toggle_layer_input_mode(self):
+        """Switch between CSV and Text input modes"""
+        if not self.shared_vars['layer_control_enabled'].get():
+            return
+            
+        mode = self.shared_vars['layer_control_mode'].get()
+        
+        if mode == 'csv':
+            self.text_frame.pack_forget()
+            self.csv_frame.pack(fill='x', expand=True)
+        else:
+            self.csv_frame.pack_forget()
+            self.text_frame.pack(fill='both', expand=True)
+    
+    def browse_layer_csv(self):
+        """Browse for layer control CSV file"""
+        filepath = filedialog.askopenfilename(
+            title="Select Layer Control CSV File",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+        )
+        if filepath:
+            self.shared_vars['layer_csv_path'].set(filepath)
+            self.gui_app.log_message(f"Layer CSV loaded: {filepath}")
+    
+    def get_layer_control_data(self):
+        """Get layer control data based on selected mode"""
+        if not self.shared_vars['layer_control_enabled'].get():
+            return None
+        
+        mode = self.shared_vars['layer_control_mode'].get()
+        
+        if mode == 'csv':
+            csv_path = self.shared_vars['layer_csv_path'].get()
+            if csv_path and os.path.exists(csv_path):
+                return self.parse_layer_csv(csv_path)
+            else:
+                messagebox.showwarning("Warning", "CSV file not found or not selected")
+                return None
+        else:  # text mode
+            text_content = self.layer_text.get(1.0, tk.END).strip()
+            if text_content:
+                return self.parse_layer_text(text_content)
+            else:
+                messagebox.showwarning("Warning", "No layer rules entered in text field")
+                return None
+    
+    def parse_layer_csv(self, csv_path):
+        """Parse CSV file with layer control rules"""
+        layer_rules = {}
+        try:
+            import csv
+            with open(csv_path, 'r', encoding='utf-8') as f:
+                reader = csv.reader(f)
+                for row in reader:
+                    if len(row) >= 2:
+                        layer_name = row[0].strip()
+                        visibility = row[1].strip().lower()
+                        filename = row[2].strip() if len(row) > 2 else None
+                        
+                        if visibility in ['show', 'hide', 'visible', 'invisible']:
+                            action = 'show' if visibility in ['show', 'visible'] else 'hide'
+                            
+                            key = filename if filename else 'global'
+                            if key not in layer_rules:
+                                layer_rules[key] = {}
+                            layer_rules[key][layer_name] = action
+            return layer_rules
+        except Exception as e:
+            self.gui_app.log_message(f"❌ Error parsing CSV: {str(e)}")
+            return None
+    
+    def parse_layer_text(self, text_content):
+        """Parse text input with layer control rules"""
+        layer_rules = {}
+        lines = text_content.split('\n')
+        
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+                
+            # Parse format: layer_name:action [for:filename]
+            if ':' not in line:
+                continue
+                
+            # Split layer action and optional filename
+            parts = line.split(' for:')
+            layer_part = parts[0].strip()
+            
+            # Parse layer name and action
+            if ':' not in layer_part:
+                continue
+                
+            layer_name, action = layer_part.split(':', 1)
+            layer_name = layer_name.strip()
+            action = action.strip().lower()
+            
+            if action not in ['show', 'hide', 'visible', 'invisible']:
+                continue
+                
+            action = 'show' if action in ['show', 'visible'] else 'hide'
+            
+            # Check for filename restriction
+            filename = parts[1].strip() if len(parts) > 1 else None
+            
+            key = filename if filename else 'global'
+            if key not in layer_rules:
+                layer_rules[key] = {}
+            layer_rules[key][layer_name] = action
+        
+        return layer_rules
     
     def browse_svg_folder(self):
         folder = filedialog.askdirectory(title="Select folder containing SVG files")
@@ -369,6 +579,17 @@ class ConverterTab:
             messagebox.showerror("Error", "DPI must be a number")
             return
         
+        # Get layer control data if enabled
+        layer_rules = None
+        if self.shared_vars['layer_control_enabled'].get():
+            layer_rules = self.get_layer_control_data()
+            if layer_rules:
+                self.gui_app.log_message("✅ Layer control rules loaded")
+                # Store in shared vars for access by conversion script
+                self.shared_vars['layer_rules'] = layer_rules
+            else:
+                return  # User cancelled or error occurred
+        
         # Get total files for progress bar
         svg_folder = self.shared_vars['svg_folder'].get()
         svg_files = [f for f in os.listdir(svg_folder) if f.lower().endswith('.svg')] if os.path.exists(svg_folder) else []
@@ -431,6 +652,11 @@ class ConverterTab:
             inkscape_path = self.shared_vars['inkscape_path'].get()
             open_output = self.shared_vars['open_output'].get()
             
+            # Get layer rules if enabled
+            layer_rules = None
+            if self.shared_vars['layer_control_enabled'].get():
+                layer_rules = self.shared_vars.get('layer_rules')
+            
             # Build complete output path
             complete_output_path = os.path.join(output_location, output_folder)
             
@@ -441,6 +667,8 @@ class ConverterTab:
             self.gui_app.log_message(f"DPI: {dpi}")
             self.gui_app.log_message(f"Create Subfolders: {create_subfolders}")
             self.gui_app.log_message(f"Inkscape Path: {inkscape_path}")
+            if layer_rules:
+                self.gui_app.log_message(f"Layer Control: Enabled ({len(layer_rules)} rules)")
             self.gui_app.log_message("="*50)
             
             # Create output directory
@@ -455,7 +683,7 @@ class ConverterTab:
                 # Calculate percentage
                 percentage = int((current / total) * 100) if total > 0 else 0
                 
-                # Update progress bar - FIXED: use config instead of assignment
+                # Update progress bar
                 self.gui_app.root.after(0, lambda p=percentage: self.progress_bar.config(value=p))
                 
                 # Update labels
@@ -500,7 +728,8 @@ class ConverterTab:
                 create_subfolders=create_subfolders,
                 inkscape_path=inkscape_path,
                 log_callback=log_callback,
-                progress_callback=progress_callback
+                progress_callback=progress_callback,
+                layer_rules=layer_rules  # Pass layer rules
             )
             
             if success:
@@ -532,8 +761,6 @@ class ConverterTab:
             self.gui_app.root.after(0, lambda: self.set_progress_error(f"Error: {str(e)}"))
             messagebox.showerror("Error", f"An error occurred:\n{str(e)}")
             return False
-    
-    
     
     def setup_progress_bar_style(self):
         """Setup the green progress bar style"""
