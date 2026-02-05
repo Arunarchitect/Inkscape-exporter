@@ -24,6 +24,10 @@ class ConverterTab:
             self.shared_vars['layer_control_mode'] = tk.StringVar(value='csv')  # 'csv' or 'text'
         if 'layer_rules' not in self.shared_vars:
             self.shared_vars['layer_rules'] = None
+            
+        # Add output format variable
+        if 'output_format' not in self.shared_vars:
+            self.shared_vars['output_format'] = tk.StringVar(value='png')  # 'png' or 'vector'
         
         # Create tab frame
         self.frame = ttk.Frame(parent)
@@ -67,7 +71,7 @@ class ConverterTab:
         title_frame = ttk.Frame(content)
         title_frame.pack(fill='x', padx=10, pady=(10, 5))
         
-        ttk.Label(title_frame, text="🖼️ SVG to PNG Converter", 
+        ttk.Label(title_frame, text="🔄 SVG Converter", 
                  font=("Arial", 16, "bold")).pack()
         
         # ====== INPUT SECTION ======
@@ -148,7 +152,7 @@ class ConverterTab:
         conv_frame.pack(fill='x', padx=10, pady=5)
         
         # DPI Settings
-        dpi_label = ttk.Label(conv_frame, text="DPI Quality:")
+        dpi_label = ttk.Label(conv_frame, text="DPI Quality (for raster content):")
         dpi_label.grid(row=0, column=0, sticky='w', pady=(0, 5))
         
         dpi_buttons_frame = ttk.Frame(conv_frame)
@@ -162,16 +166,31 @@ class ConverterTab:
         ttk.Label(dpi_buttons_frame, text="Custom:").pack(side='left', padx=(10, 5))
         ttk.Entry(dpi_buttons_frame, textvariable=self.shared_vars['dpi'], width=8).pack(side='left')
         
+        # Output Format Selection
+        format_frame = ttk.Frame(conv_frame)
+        format_frame.grid(row=2, column=0, columnspan=2, sticky='w', pady=(10, 5))
+        
+        ttk.Label(format_frame, text="Output Format:").pack(side='left', padx=(0, 10))
+        
+        ttk.Radiobutton(format_frame, text="PNG (Raster)", 
+                       variable=self.shared_vars['output_format'],
+                       value='png').pack(side='left', padx=(0, 10))
+        
+        ttk.Radiobutton(format_frame, text="PDF (Vector)", 
+                       variable=self.shared_vars['output_format'],
+                       value='vector').pack(side='left')
+        
         # Options
         options_frame = ttk.Frame(conv_frame)
-        options_frame.grid(row=2, column=0, columnspan=2, sticky='w', pady=(0, 5))
+        options_frame.grid(row=3, column=0, columnspan=2, sticky='w', pady=(10, 5))
         
-        # Add auto-merge checkbox
+        # Add auto-merge checkbox - only show for PNG format
         if 'auto_merge' not in self.shared_vars:
             self.shared_vars['auto_merge'] = tk.BooleanVar(value=True)
         
-        ttk.Checkbutton(options_frame, text="Merge to PDF automatically after conversion", 
-                       variable=self.shared_vars['auto_merge']).pack(anchor='w', pady=2)
+        self.auto_merge_checkbox = ttk.Checkbutton(options_frame, text="Merge to PDF automatically after conversion", 
+                       variable=self.shared_vars['auto_merge'])
+        self.auto_merge_checkbox.pack(anchor='w', pady=2)
         
         ttk.Checkbutton(options_frame, text="Create subfolders for each SVG", 
                        variable=self.shared_vars['create_subfolders']).pack(anchor='w', pady=2)
@@ -338,6 +357,19 @@ Examples:
                  bg="#f0f0f0", fg="black",
                  font=("Arial", 9),
                  padx=15, pady=8).pack(side='right')
+        
+        # Bind format change to update auto-merge checkbox state
+        self.shared_vars['output_format'].trace('w', self.update_auto_merge_visibility)
+        self.update_auto_merge_visibility()
+    
+    def update_auto_merge_visibility(self, *args):
+        """Show/hide auto-merge checkbox based on output format"""
+        output_format = self.shared_vars['output_format'].get()
+        
+        if output_format == 'png':
+            self.auto_merge_checkbox.pack(anchor='w', pady=2)
+        else:
+            self.auto_merge_checkbox.pack_forget()
     
     def toggle_layer_controls(self):
         """Toggle layer control section visibility"""
@@ -611,13 +643,15 @@ Examples:
         thread.start()
     
     def run_conversion_and_merge(self):
-        """Run conversion and optionally merge to PDF"""
+        """Run conversion and optionally merge to PDF (only for PNG format)"""
         try:
+            output_format = self.shared_vars['output_format'].get()
+            
             # Run the conversion first
             success = self.run_conversion()
             
-            # If conversion successful and auto-merge is checked
-            if success and self.shared_vars.get('auto_merge', tk.BooleanVar(value=True)).get():
+            # If conversion successful and auto-merge is checked AND format is PNG
+            if success and output_format == 'png' and self.shared_vars.get('auto_merge', tk.BooleanVar(value=True)).get():
                 self.gui_app.log_message("\n" + "="*50)
                 self.gui_app.log_message("Starting automatic PDF merge...")
                 self.gui_app.log_message("="*50)
@@ -637,11 +671,17 @@ Examples:
             self.gui_app.root.after(0, lambda: self.convert_btn.config(state='normal', bg="#0078D7"))
     
     def run_conversion(self):
-        """Run the SVG to PNG conversion with real-time progress tracking"""
+        """Run the SVG to PNG/Vector conversion with real-time progress tracking"""
         try:
-            # Import png module directly
-            sys.path.append('.')  # Add current directory to path
-            import png as png_module
+            output_format = self.shared_vars['output_format'].get()
+            
+            # Determine which module to use based on output format
+            if output_format == 'png':
+                import png as conversion_module
+                format_name = "PNG"
+            else:  # 'vector'
+                import vector as conversion_module
+                format_name = "PDF (Vector)"
             
             # Prepare arguments
             svg_folder = self.shared_vars['svg_folder'].get()
@@ -660,13 +700,23 @@ Examples:
             # Build complete output path
             complete_output_path = os.path.join(output_location, output_folder)
             
+            # For vector output, check if auto-merge is enabled
+            auto_merge_pdf = False
+            if output_format == 'vector':
+                # Check if auto-merge is checked (you might want to add this option to GUI)
+                # For now, we'll default to True for vector output
+                auto_merge_pdf = True
+            
             self.gui_app.log_message("\n" + "="*50)
-            self.gui_app.log_message("Starting conversion...")
+            self.gui_app.log_message(f"Starting {format_name} conversion...")
             self.gui_app.log_message(f"SVG Folder: {svg_folder}")
             self.gui_app.log_message(f"Output Location: {complete_output_path}")
             self.gui_app.log_message(f"DPI: {dpi}")
+            self.gui_app.log_message(f"Output Format: {format_name}")
             self.gui_app.log_message(f"Create Subfolders: {create_subfolders}")
             self.gui_app.log_message(f"Inkscape Path: {inkscape_path}")
+            if output_format == 'vector':
+                self.gui_app.log_message(f"Auto-merge PDFs: {auto_merge_pdf}")
             if layer_rules:
                 self.gui_app.log_message(f"Layer Control: Enabled ({len(layer_rules)} rules)")
             self.gui_app.log_message("="*50)
@@ -721,39 +771,62 @@ Examples:
             self.progress_bar.config(style="green.Horizontal.TProgressbar")
             
             # Run conversion directly (not as subprocess)
-            success = png_module.batch_convert(
-                svg_folder=svg_folder,
-                output_path=complete_output_path,
-                dpi=dpi,
-                create_subfolders=create_subfolders,
-                inkscape_path=inkscape_path,
-                log_callback=log_callback,
-                progress_callback=progress_callback,
-                layer_rules=layer_rules  # Pass layer rules
-            )
+            if output_format == 'png':
+                success = conversion_module.batch_convert(
+                    svg_folder=svg_folder,
+                    output_path=complete_output_path,
+                    dpi=dpi,
+                    create_subfolders=create_subfolders,
+                    inkscape_path=inkscape_path,
+                    log_callback=log_callback,
+                    progress_callback=progress_callback,
+                    layer_rules=layer_rules
+                )
+            else:  # vector
+                success = conversion_module.batch_convert(
+                    svg_folder=svg_folder,
+                    output_path=complete_output_path,
+                    dpi=dpi,
+                    create_subfolders=create_subfolders,
+                    inkscape_path=inkscape_path,
+                    log_callback=log_callback,
+                    progress_callback=progress_callback,
+                    layer_rules=layer_rules,
+                    auto_merge_pdf=auto_merge_pdf  # Pass auto-merge parameter
+                )
             
             if success:
-                self.gui_app.log_message("\n✅ Conversion completed successfully!")
-                self.gui_app.root.after(0, lambda: self.set_progress_complete("Conversion successful!"))
+                self.gui_app.log_message(f"\n✅ {format_name} conversion completed successfully!")
+                self.gui_app.root.after(0, lambda: self.set_progress_complete(f"{format_name} conversion successful!"))
                 
-                # Store the conversion output path for PDF merge
-                self.conversion_output_path = complete_output_path
+                # Store the conversion output path for PDF merge (only for PNG)
+                if output_format == 'png':
+                    self.conversion_output_path = complete_output_path
                 
-                # Open output folder if option is selected (but not if auto-merge is on)
-                if open_output and os.path.exists(complete_output_path) and not self.shared_vars.get('auto_merge', tk.BooleanVar(value=True)).get():
-                    try:
-                        os.startfile(complete_output_path)
-                        self.gui_app.log_message(f"📂 Opened output folder: {complete_output_path}")
-                    except:
+                # Open output folder if option is selected (but not if auto-merge is on and format is PNG)
+                if open_output and os.path.exists(complete_output_path):
+                    if output_format == 'png' and self.shared_vars.get('auto_merge', tk.BooleanVar(value=True)).get():
+                        # Don't open folder if auto-merge is enabled for PNG
                         self.gui_app.log_message(f"📂 Output folder: {complete_output_path}")
+                    else:
+                        try:
+                            os.startfile(complete_output_path)
+                            self.gui_app.log_message(f"📂 Opened output folder: {complete_output_path}")
+                        except:
+                            self.gui_app.log_message(f"📂 Output folder: {complete_output_path}")
                 
                 return True
             else:
-                self.gui_app.log_message("\n❌ Conversion failed!")
-                self.gui_app.root.after(0, lambda: self.set_progress_error("Conversion failed"))
-                messagebox.showerror("Error", "Conversion failed. Check log for details.")
+                self.gui_app.log_message(f"\n❌ {format_name} conversion failed!")
+                self.gui_app.root.after(0, lambda: self.set_progress_error(f"{format_name} conversion failed"))
+                messagebox.showerror("Error", f"{format_name} conversion failed. Check log for details.")
                 return False
             
+        except ImportError as e:
+            self.gui_app.log_message(f"❌ Error: Could not import conversion module: {str(e)}")
+            self.gui_app.root.after(0, lambda: self.set_progress_error(f"Missing conversion module"))
+            messagebox.showerror("Error", f"Could not import conversion module.\nMake sure you have {'png.py' if self.shared_vars['output_format'].get() == 'png' else 'vector.py'} in the same directory.")
+            return False
         except Exception as e:
             self.gui_app.log_message(f"❌ Error: {str(e)}")
             import traceback
@@ -761,6 +834,9 @@ Examples:
             self.gui_app.root.after(0, lambda: self.set_progress_error(f"Error: {str(e)}"))
             messagebox.showerror("Error", f"An error occurred:\n{str(e)}")
             return False
+    
+    
+    
     
     def setup_progress_bar_style(self):
         """Setup the green progress bar style"""
@@ -780,10 +856,15 @@ Examples:
         self.progress_bar.config(style="green.Horizontal.TProgressbar")
     
     def trigger_pdf_merge(self):
-        """Trigger the PDF merge after conversion"""
+        """Trigger the PDF merge after PNG conversion"""
         try:
             if not hasattr(self, 'conversion_output_path'):
                 self.gui_app.log_message("❌ No conversion output path found for PDF merge")
+                return
+            
+            # Only trigger PDF merge if output format is PNG
+            if self.shared_vars['output_format'].get() != 'png':
+                self.gui_app.log_message("❌ PDF merge is only available for PNG output format")
                 return
             
             # Get reference to PDF merge tab
