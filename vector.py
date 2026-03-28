@@ -181,6 +181,53 @@ def detect_raster_content(svg_path):
         # If we can't read or parse, assume it might have raster content
         return True
 
+def get_svg_page_count(svg_path):
+    """
+    Get the number of pages in an SVG file by checking for multiple pages.
+    Inkscape uses <page> elements for multi-page documents.
+    """
+    try:
+        with open(svg_path, 'r', encoding='utf-8') as f:
+            svg_content = f.read()
+        
+        # Parse SVG to count page elements
+        namespaces = {
+            'svg': 'http://www.w3.org/2000/svg',
+            'inkscape': 'http://www.inkscape.org/namespaces/inkscape',
+            'sodipodi': 'http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd'
+        }
+        
+        try:
+            root = ET.fromstring(svg_content)
+            # Count page elements (if any)
+            # Check for various ways pages might be represented
+            page_elements = []
+            
+            # Try different namespace patterns
+            for ns in ['', 'svg', 'inkscape']:
+                if ns:
+                    page_elements.extend(root.findall(f'.//{{{ns}}}page'))
+                else:
+                    page_elements.extend(root.findall('.//page'))
+            
+            page_count = len(page_elements)
+            
+            # If no explicit pages, it's a single page document
+            if page_count == 0:
+                # Also check for named pages attribute
+                if root.get('{http://www.inkscape.org/namespaces/inkscape}pages'):
+                    # Could have pages stored differently
+                    return 1  # Default to 1 if we can't determine
+                return 1
+            return page_count
+        except ET.ParseError:
+            # If we can't parse, assume single page
+            return 1
+    except Exception as e:
+        if global_log_callback:
+            global_log_callback(f"Warning: Could not determine page count: {e}")
+        return 1
+
 def convert_svg_to_pdf(svg_path, output_pattern, dpi, inkscape_path, layer_rules=None):
     """Convert a single SVG file to PDF(s) with optional layer control"""
     # Use global log_callback
@@ -237,6 +284,12 @@ def convert_svg_to_pdf(svg_path, output_pattern, dpi, inkscape_path, layer_rules
     # Detect raster content to determine export method
     has_raster = detect_raster_content(temp_svg_path)
     
+    # Get the actual number of pages in the SVG
+    page_count = get_svg_page_count(temp_svg_path)
+    
+    if global_log_callback:
+        global_log_callback(f"  Detected {page_count} page(s) in SVG")
+    
     # List to track created files
     files_created = []
     
@@ -245,6 +298,7 @@ def convert_svg_to_pdf(svg_path, output_pattern, dpi, inkscape_path, layer_rules
     os.chdir(output_dir)
     
     try:
+        # Export first page (page 1)
         if has_raster:
             # If raster content found, use --export-dpi for bitmap resolution
             if global_log_callback:
@@ -256,28 +310,15 @@ def convert_svg_to_pdf(svg_path, output_pattern, dpi, inkscape_path, layer_rules
             
             result1 = subprocess.run(cmd1, shell=True, capture_output=True, text=True, encoding='utf-8')
             
-            if os.path.exists(output_file_1):
+            if os.path.exists(output_file_1) and os.path.getsize(output_file_1) > 0:
                 files_created.append(output_file_1)
             else:
                 # Try with --export-page=1 if basic export fails
                 cmd1b = f'"{inkscape_path}" "{temp_svg_path}" --export-type=pdf --export-page=1 --export-dpi={dpi} --export-filename="{output_file_1}"'
                 result1b = subprocess.run(cmd1b, shell=True, capture_output=True, text=True, encoding='utf-8')
                 
-                if os.path.exists(output_file_1):
+                if os.path.exists(output_file_1) and os.path.getsize(output_file_1) > 0:
                     files_created.append(output_file_1)
-            
-            # Export additional pages with DPI setting
-            for page_num in range(2, 6):
-                output_file = f"{base_name}_p{page_num}.pdf"
-                cmd = f'"{inkscape_path}" "{temp_svg_path}" --export-type=pdf --export-page={page_num} --export-dpi={dpi} --export-filename="{output_file}"'
-                
-                result = subprocess.run(cmd, shell=True, capture_output=True, text=True, encoding='utf-8')
-                
-                if os.path.exists(output_file):
-                    files_created.append(output_file)
-                else:
-                    # Stop if this page doesn't exist
-                    break
         else:
             # Pure vector content - export directly without DPI setting
             if global_log_callback:
@@ -289,27 +330,35 @@ def convert_svg_to_pdf(svg_path, output_pattern, dpi, inkscape_path, layer_rules
             
             result1 = subprocess.run(cmd1, shell=True, capture_output=True, text=True, encoding='utf-8')
             
-            if os.path.exists(output_file_1):
+            if os.path.exists(output_file_1) and os.path.getsize(output_file_1) > 0:
                 files_created.append(output_file_1)
             else:
                 # Try with --export-page=1 if basic export fails
                 cmd1b = f'"{inkscape_path}" "{temp_svg_path}" --export-type=pdf --export-page=1 --export-filename="{output_file_1}"'
                 result1b = subprocess.run(cmd1b, shell=True, capture_output=True, text=True, encoding='utf-8')
                 
-                if os.path.exists(output_file_1):
+                if os.path.exists(output_file_1) and os.path.getsize(output_file_1) > 0:
                     files_created.append(output_file_1)
-            
-            # Export additional pages (direct vector export)
-            for page_num in range(2, 6):
+        
+        # Export additional pages - only if there are more than 1 page
+        if page_count > 1:
+            for page_num in range(2, page_count + 1):
                 output_file = f"{base_name}_p{page_num}.pdf"
-                cmd = f'"{inkscape_path}" "{temp_svg_path}" --export-type=pdf --export-page={page_num} --export-filename="{output_file}"'
+                
+                if has_raster:
+                    cmd = f'"{inkscape_path}" "{temp_svg_path}" --export-type=pdf --export-page={page_num} --export-dpi={dpi} --export-filename="{output_file}"'
+                else:
+                    cmd = f'"{inkscape_path}" "{temp_svg_path}" --export-type=pdf --export-page={page_num} --export-filename="{output_file}"'
                 
                 result = subprocess.run(cmd, shell=True, capture_output=True, text=True, encoding='utf-8')
                 
-                if os.path.exists(output_file):
+                # Check if file was created and has content
+                if os.path.exists(output_file) and os.path.getsize(output_file) > 0:
                     files_created.append(output_file)
                 else:
-                    # Stop if this page doesn't exist
+                    # Stop if this page doesn't exist or is empty
+                    if global_log_callback:
+                        global_log_callback(f"  Page {page_num} not found or empty, stopping export")
                     break
     
     finally:
