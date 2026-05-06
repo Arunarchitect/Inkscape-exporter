@@ -1,3 +1,8 @@
+print("DEBUG: gui.py is being executed", flush=True)
+import sys
+print(f"DEBUG: Python version: {sys.version}", flush=True)
+print(f"DEBUG: Script name: {sys.argv[0]}", flush=True)
+
 import tkinter as tk
 from tkinter import ttk
 import converter_tab

@@ -1,514 +1,593 @@
-import subprocess
+"""
+png.py  -  SVG to PNG batch converter
+
+Fixes applied:
+1. Pre-process SVGs to remove/fix malformed empty path elements (e.g. "M Z")
+   that cause Inkscape to emit warnings and fail to produce output.
+2. Removed broken page-loop logic; Inkscape is called once per file.
+3. Improved temp-file placement (same dir as SVG so relative links resolve).
+"""
+
+import base64
+import copy
+import mimetypes
 import os
+import re
+import subprocess
 import sys
-import json
-from pathlib import Path
 import tempfile
 import xml.etree.ElementTree as ET
+from pathlib import Path
 
-# Global variable for log callback
+# ---------------------------------------------------------------------------
+# Namespace URIs
+# ---------------------------------------------------------------------------
+NS_SVG      = 'http://www.w3.org/2000/svg'
+NS_INK      = 'http://www.inkscape.org/namespaces/inkscape'
+NS_XLINK    = 'http://www.w3.org/1999/xlink'
+NS_SODIPODI = 'http://sodipodi.sourceforge.net/DTD/sodipodi-0.0.dtd'
+
+_NAMESPACES = {
+    '':          NS_SVG,
+    'svg':       NS_SVG,
+    'inkscape':  NS_INK,
+    'xlink':     NS_XLINK,
+    'sodipodi':  NS_SODIPODI,
+    'dc':        'http://purl.org/dc/elements/1.1/',
+    'cc':        'http://creativecommons.org/ns#',
+    'rdf':       'http://www.w3.org/1999/02/22-rdf-syntax-ns#',
+}
+for _pfx, _uri in _NAMESPACES.items():
+    ET.register_namespace(_pfx, _uri)
+
 global_log_callback = None
 
-def get_svg_files(folder_path):
-    """Get all SVG files from folder, sorted alphabetically"""
-    svg_files = []
-    for file in sorted(os.listdir(folder_path)):
-        if file.lower().endswith('.svg'):
-            svg_files.append(file)
-    return svg_files
 
-def parse_svg_layers(svg_content):
-    """Parse SVG to extract layer information"""
-    namespaces = {
-        'svg': 'http://www.w3.org/2000/svg',
-        'inkscape': 'http://www.inkscape.org/namespaces/inkscape'
-    }
-    
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+
+def _log(message):
+    if global_log_callback:
+        global_log_callback(message)
+    else:
+        try:
+            print(message)
+        except UnicodeEncodeError:
+            print(message.encode('ascii', 'ignore').decode('ascii'))
+
+
+# ---------------------------------------------------------------------------
+# SVG sanitizer  ← KEY FIX
+# ---------------------------------------------------------------------------
+
+def _sanitize_svg_content(content):
+    """
+    Remove or fix SVG elements that cause Inkscape to emit warnings and
+    fail to produce output.
+
+    Known problems fixed here:
+    - path d="M Z"   → empty move-then-close: remove the entire path element
+    - path d="M"     → bare M with no coordinates: remove
+    - path d=""      → empty d attribute: remove
+    - Any path whose d attribute, after stripping whitespace, matches the
+      regex ^[Mm]\s*[Zz]?$ (nothing but an optional move + optional close).
+    """
     try:
-        root = ET.fromstring(svg_content)
-        
-        # Find all groups with inkscape:groupmode="layer"
-        layers = {}
-        for elem in root.iter():
-            # Check for Inkscape layers
-            groupmode = elem.get('{http://www.inkscape.org/namespaces/inkscape}groupmode')
-            label = elem.get('{http://www.inkscape.org/namespaces/inkscape}label')
-            
-            if groupmode == 'layer' and label:
-                layer_id = elem.get('id', '')
-                layers[label] = {
-                    'id': layer_id,
-                    'elem': elem,
-                    'style': elem.get('style', '')
-                }
-        
-        return layers
+        root = ET.fromstring(content)
+        removed = 0
+
+        # Collect (parent, element) pairs for bad paths
+        bad_pairs = []
+        for parent in root.iter():
+            for child in list(parent):
+                if child.tag != f'{{{NS_SVG}}}path':
+                    # Also handle un-namespaced <path> tags
+                    if not (child.tag == 'path' or
+                            child.tag.endswith('}path')):
+                        continue
+                d = child.get('d', '').strip()
+                # Empty d, or just "M Z" / "m z" / "M" / "m"
+                if not d or re.match(r'^[Mm]\s*[Zz]?\s*$', d):
+                    bad_pairs.append((parent, child))
+
+        for parent, child in bad_pairs:
+            parent.remove(child)
+            removed += 1
+
+        if removed:
+            _log(f"  [SANITIZE] Removed {removed} empty/malformed path(s) "
+                 f"(e.g. d=\"M Z\") that would cause Inkscape warnings.")
+            # Re-serialise
+            for pfx, uri in _NAMESPACES.items():
+                ET.register_namespace(pfx, uri)
+            return ET.tostring(root, encoding='unicode', xml_declaration=False)
+
+        return content
+
+    except ET.ParseError as e:
+        _log(f"  [WARN] XML parse error during sanitization: {e} — skipping")
+        return content
     except Exception as e:
-        if global_log_callback:
-            global_log_callback(f"Warning: Could not parse SVG layers: {e}")
-        else:
-            print(f"Warning: Could not parse SVG layers: {e}")
-        return {}
+        _log(f"  [WARN] Sanitization error: {e} — skipping")
+        return content
+
+
+# ---------------------------------------------------------------------------
+# File utilities
+# ---------------------------------------------------------------------------
+
+def get_svg_files(folder_path):
+    try:
+        return sorted(
+            (f for f in os.listdir(folder_path) if f.lower().endswith('.svg')),
+            key=str.lower,
+        )
+    except OSError as e:
+        _log(f"[ERROR] Cannot list folder {folder_path}: {e}")
+        return []
+
+
+# ---------------------------------------------------------------------------
+# External-resource embedder (same logic as vector.py)
+# ---------------------------------------------------------------------------
+
+def _safe_tostring(root):
+    for pfx, uri in _NAMESPACES.items():
+        ET.register_namespace(pfx, uri)
+    return ET.tostring(root, encoding='unicode', xml_declaration=False)
+
+
+def _resolve_href(href, svg_dir):
+    if not href:
+        return None, ''
+    if href.startswith('data:') or href.startswith('http://') \
+            or href.startswith('https://') or href.startswith('//'):
+        return None, ''
+    fragment = ''
+    if '#' in href:
+        href, fragment = href.split('#', 1)
+    if not href:
+        return None, fragment
+    path = href if os.path.isabs(href) \
+        else os.path.normpath(os.path.join(svg_dir, href))
+    if not os.path.isfile(path):
+        candidate = os.path.join(svg_dir, os.path.basename(href))
+        if os.path.isfile(candidate):
+            path = candidate
+    return (path if os.path.isfile(path) else None), fragment
+
+
+def _find_parent(root, target):
+    for parent in root.iter():
+        if target in list(parent):
+            return parent
+    return None
+
+
+def _inline_svg_file(linked_svg_path, fragment, seen=None):
+    if seen is None:
+        seen = set()
+    abs_path = os.path.abspath(linked_svg_path)
+    if abs_path in seen:
+        _log(f"  [WARN] Circular SVG reference, skipping: {linked_svg_path}")
+        return None
+    seen.add(abs_path)
+    try:
+        with open(linked_svg_path, 'r', encoding='utf-8', errors='replace') as fh:
+            content = fh.read()
+        linked_dir = os.path.dirname(abs_path)
+        content, _ = _embed_all_resources(content, linked_dir, seen=set(seen))
+        linked_root = ET.fromstring(content)
+        if fragment:
+            for el in linked_root.iter():
+                if el.get('id') == fragment:
+                    return el
+            return None
+        return linked_root
+    except Exception as e:
+        _log(f"  [WARN] Could not inline {os.path.basename(linked_svg_path)}: {e}")
+        return None
+
+
+def _embed_all_resources(svg_content, svg_dir, seen=None):
+    if seen is None:
+        seen = set()
+    try:
+        root    = ET.fromstring(svg_content)
+        changes = 0
+
+        for elem in list(root.iter(f'{{{NS_SVG}}}image')):
+            for attr in (f'{{{NS_XLINK}}}href', 'href'):
+                href = elem.get(attr, '').strip()
+                if not href or href.startswith('data:'):
+                    continue
+                file_path, fragment = _resolve_href(href, svg_dir)
+                if file_path is None:
+                    continue
+                ext = os.path.splitext(file_path)[1].lower()
+                if ext == '.svg':
+                    linked_elem = _inline_svg_file(file_path, fragment,
+                                                   seen=set(seen))
+                    if linked_elem is not None:
+                        for geo in ('x', 'y', 'width', 'height',
+                                    'id', 'style', 'transform',
+                                    'preserveAspectRatio'):
+                            val = elem.get(geo)
+                            if val:
+                                linked_elem.set(geo, val)
+                        parent = _find_parent(root, elem)
+                        if parent is not None:
+                            idx = list(parent).index(elem)
+                            parent.remove(elem)
+                            parent.insert(idx, linked_elem)
+                            changes += 1
+                else:
+                    mime, _ = mimetypes.guess_type(file_path)
+                    if not mime:
+                        mime = 'image/png'
+                    try:
+                        with open(file_path, 'rb') as fh:
+                            b64 = base64.b64encode(fh.read()).decode('ascii')
+                        data_uri = f"data:{mime};base64,{b64}"
+                        elem.set(attr, data_uri)
+                        other = ('href' if attr.endswith('}href')
+                                 else f'{{{NS_XLINK}}}href')
+                        if elem.get(other) == href:
+                            del elem.attrib[other]
+                        changes += 1
+                    except OSError as e:
+                        _log(f"  [WARN] Could not read {file_path}: {e}")
+                break
+
+        if changes:
+            return _safe_tostring(root), True
+        return svg_content, False
+
+    except ET.ParseError:
+        return svg_content, False
+    except Exception:
+        return svg_content, False
+
+
+# ---------------------------------------------------------------------------
+# Layer visibility
+# ---------------------------------------------------------------------------
 
 def apply_layer_visibility(svg_content, layer_rules, filename=None):
-    """Apply visibility rules to SVG layers"""
     if not layer_rules:
-        return svg_content
-    
+        return svg_content, False
     try:
-        # Parse SVG
-        namespaces = {
-            'svg': 'http://www.w3.org/2000/svg',
-            'inkscape': 'http://www.inkscape.org/namespaces/inkscape'
-        }
-        
-        root = ET.fromstring(svg_content)
-        
-        # Check both global rules and filename-specific rules
-        applicable_rules = {}
-        
-        # Add global rules
+        root       = ET.fromstring(svg_content)
+        applicable = {}
         if 'global' in layer_rules:
-            applicable_rules.update(layer_rules['global'])
-        
-        # Add filename-specific rules
+            applicable.update(layer_rules['global'])
         if filename:
-            # Try exact match first
             if filename in layer_rules:
-                applicable_rules.update(layer_rules[filename])
-            
-            # Try without extension
-            basename = os.path.splitext(filename)[0]
-            if basename in layer_rules:
-                applicable_rules.update(layer_rules[basename])
-        
-        if not applicable_rules:
-            return svg_content
-        
-        # Apply rules to layers
-        layers_modified = 0
+                applicable.update(layer_rules[filename])
+            base = os.path.splitext(filename)[0]
+            if base in layer_rules:
+                applicable.update(layer_rules[base])
+        if not applicable:
+            return svg_content, False
+
+        modified = 0
         for elem in root.iter():
-            # Check if this is a layer
-            groupmode = elem.get('{http://www.inkscape.org/namespaces/inkscape}groupmode')
-            label = elem.get('{http://www.inkscape.org/namespaces/inkscape}label')
-            elem_id = elem.get('id', '')
-            
-            # Check by label (preferred) or by ID
-            layer_key = None
-            if label and label in applicable_rules:
-                layer_key = label
-            elif elem_id in applicable_rules:
-                layer_key = elem_id
-            
-            if layer_key and groupmode == 'layer':
-                action = applicable_rules[layer_key]
-                
-                # Get current style
-                current_style = elem.get('style', '')
-                
-                # Parse style attributes
-                style_parts = {}
-                if current_style:
-                    for part in current_style.split(';'):
-                        if ':' in part:
-                            key, value = part.split(':', 1)
-                            style_parts[key.strip()] = value.strip()
-                
-                # Set visibility
-                if action == 'hide':
-                    style_parts['display'] = 'none'
-                elif action == 'show':
-                    # Remove display:none if present
-                    if 'display' in style_parts and style_parts['display'] == 'none':
-                        del style_parts['display']
-                
-                # Rebuild style string
-                new_style = ';'.join([f"{k}:{v}" for k, v in style_parts.items()])
-                elem.set('style', new_style)
-                
-                layers_modified += 1
-                if global_log_callback:
-                    global_log_callback(f"  Applied {action} to layer: {layer_key}")
-                else:
-                    print(f"  Applied {action} to layer: {layer_key}")
-        
-        if layers_modified > 0:
-            if global_log_callback:
-                global_log_callback(f"  Modified {layers_modified} layers")
-            else:
-                print(f"  Modified {layers_modified} layers")
-            return ET.tostring(root, encoding='unicode')
-        else:
-            return svg_content
-            
+            if elem.get(f'{{{NS_INK}}}groupmode') != 'layer':
+                continue
+            label = elem.get(f'{{{NS_INK}}}label', '')
+            eid   = elem.get('id', '')
+            key   = (label if label in applicable
+                     else (eid if eid in applicable else None))
+            if key is None:
+                continue
+            action = applicable[key]
+            parts = {}
+            for p in elem.get('style', '').split(';'):
+                if ':' in p:
+                    k, v = p.split(':', 1)
+                    parts[k.strip()] = v.strip()
+            if action == 'hide':
+                parts['display'] = 'none'
+            elif action == 'show':
+                parts.pop('display', None)
+                parts.pop('visibility', None)
+            elem.set('style', ';'.join(f"{k}:{v}" for k, v in parts.items()))
+            modified += 1
+            _log(f"  Layer '{key}' → {action}")
+
+        if modified:
+            return _safe_tostring(root), True
+        return svg_content, False
+
     except Exception as e:
-        if global_log_callback:
-            global_log_callback(f"Warning: Error applying layer rules: {e}")
-        else:
-            print(f"Warning: Error applying layer rules: {e}")
-        return svg_content
+        _log(f"  [WARN] Could not apply layer rules: {e}")
+        return svg_content, False
 
-def convert_svg_to_png(svg_path, output_pattern, dpi, inkscape_path, layer_rules=None):
-    """Convert a single SVG file to PNG(s) with optional layer control"""
-    # Use global log_callback
-    global global_log_callback
-    
-    # Ensure output directory exists
-    output_dir = os.path.dirname(output_pattern)
-    os.makedirs(output_dir, exist_ok=True)
-    
-    # Get base name for output
-    if output_pattern.endswith('.png'):
-        base_name = os.path.basename(output_pattern[:-4])
-    else:
-        base_name = os.path.basename(output_pattern)
-    
-    # Get SVG filename for layer rule matching
-    svg_filename = os.path.basename(svg_path)
-    
-    # Check if layer control is needed
-    if layer_rules:
-        try:
-            # Read SVG content
-            with open(svg_path, 'r', encoding='utf-8') as f:
-                svg_content = f.read()
-            
-            # Apply layer visibility rules
-            if global_log_callback:
-                global_log_callback(f"  Applying layer rules to: {svg_filename}")
-            else:
-                print(f"  Applying layer rules to: {svg_filename}")
-            
-            svg_content = apply_layer_visibility(svg_content, layer_rules, svg_filename)
-            
-            # Create temporary SVG file with modified layers
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.svg', delete=False, encoding='utf-8') as temp_svg:
-                temp_svg.write(svg_content)
-                temp_svg_path = temp_svg.name
-            
-            # Clean up flag
-            cleanup_temp = True
-            
-        except Exception as e:
-            if global_log_callback:
-                global_log_callback(f"Warning: Could not apply layer rules ({e}), using original file")
-            else:
-                print(f"Warning: Could not apply layer rules ({e}), using original file")
-            temp_svg_path = svg_path
-            cleanup_temp = False
-    else:
-        # No layer control needed
-        temp_svg_path = svg_path
-        cleanup_temp = False
-    
-    # List to track created files
-    files_created = []
-    
-    # Change to output directory before running commands
-    original_dir = os.getcwd()
-    os.chdir(output_dir)
-    
+
+# ---------------------------------------------------------------------------
+# SVG preparation: sanitize + embed + layer rules
+# ---------------------------------------------------------------------------
+
+def _prepare_svg(svg_path, layer_rules, svg_filename):
+    """
+    1. Read the SVG.
+    2. Sanitize malformed paths  ← NEW FIX
+    3. Embed external resources.
+    4. Apply layer rules.
+    If any change was made, write a temp file in the SAME directory and
+    return its path.  Returns (path_to_use, should_delete_temp).
+    """
+    svg_dir = os.path.dirname(os.path.abspath(svg_path))
+    changed = False
+
     try:
-        # Convert using the temporary/modified SVG
-        # COMMAND 1: Export page 1
-        output_file_1 = f"{base_name}.png"
-        cmd1 = f'"{inkscape_path}" "{temp_svg_path}" --export-type=png --export-dpi={dpi} --export-filename="{output_file_1}"'
-        
-        result1 = subprocess.run(cmd1, shell=True, capture_output=True, text=True, encoding='utf-8')
-        
-        if os.path.exists(output_file_1):
-            files_created.append(output_file_1)
-        else:
-            # Try with --export-page=1 if basic export fails
-            cmd1b = f'"{inkscape_path}" "{temp_svg_path}" --export-type=png --export-page=1 --export-dpi={dpi} --export-filename="{output_file_1}"'
-            result1b = subprocess.run(cmd1b, shell=True, capture_output=True, text=True, encoding='utf-8')
-            
-            if os.path.exists(output_file_1):
-                files_created.append(output_file_1)
-        
-        # COMMAND 2-5: Export additional pages
-        for page_num in range(2, 6):
-            output_file = f"{base_name}_p{page_num}.png"
-            cmd = f'"{inkscape_path}" "{temp_svg_path}" --export-type=png --export-page={page_num} --export-dpi={dpi} --export-filename="{output_file}"'
-            
-            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, encoding='utf-8')
-            
-            if os.path.exists(output_file):
-                files_created.append(output_file)
-            else:
-                # Stop if this page doesn't exist
-                break
-    
-    finally:
-        # Change back to original directory
-        os.chdir(original_dir)
-        
-        # Clean up temporary file if created
-        if cleanup_temp and os.path.exists(temp_svg_path):
-            try:
-                os.unlink(temp_svg_path)
-            except:
-                pass
-    
-    # Create result object
-    if files_created:
-        # Success result
-        class SuccessResult:
-            def __init__(self, files):
-                self.returncode = 0
-                self.stdout = f"Created {len(files)} PNG file(s)"
-                self.stderr = ""
-                self.files_created = files
-        return SuccessResult(files_created)
-    else:
-        # Error result
-        class ErrorResult:
-            def __init__(self):
-                self.returncode = 1
-                self.stdout = ""
-                self.stderr = "Failed to create any PNG files"
-        return ErrorResult()
+        with open(svg_path, 'r', encoding='utf-8', errors='replace') as fh:
+            content = fh.read()
 
-def batch_convert(svg_folder, output_path, dpi, create_subfolders=True, 
-                  inkscape_path=None, log_callback=None, progress_callback=None,
-                  layer_rules=None):
+        # Step 1: sanitize malformed paths
+        sanitized = _sanitize_svg_content(content)
+        if sanitized != content:
+            content = sanitized
+            changed = True
+
+        # Step 2: embed external resources
+        new_content, embed_changed = _embed_all_resources(content, svg_dir)
+        if embed_changed:
+            content = new_content
+            changed = True
+
+        # Step 3: layer rules
+        if layer_rules:
+            _log(f"  Applying layer rules to: {svg_filename}")
+            new_content, layer_changed = apply_layer_visibility(
+                content, layer_rules, svg_filename)
+            if layer_changed:
+                content = new_content
+                changed = True
+
+        if not changed:
+            return svg_path, False
+
+        tmp = tempfile.NamedTemporaryFile(
+            mode='w', suffix='.svg', delete=False,
+            encoding='utf-8', dir=svg_dir)
+        tmp.write(content)
+        tmp.close()
+        _log(f"  Prepared temp SVG: {os.path.basename(tmp.name)}")
+        return tmp.name, True
+
+    except Exception as e:
+        _log(f"  [WARN] SVG preparation failed ({e}) — using original file")
+        return svg_path, False
+
+
+# ---------------------------------------------------------------------------
+# Single Inkscape call → PNG
+# ---------------------------------------------------------------------------
+
+def _run_inkscape_png(inkscape_path, svg_abs, out_png, dpi,
+                      timeout=180):
     """
-    Batch convert all SVG files in a folder to PNG with progress reporting
+    Export svg_abs to out_png at the given DPI.
+    Returns True iff out_png was created with non-zero size.
     """
-    # Store log_callback in global variable for use in other functions
+    cmd = [
+        inkscape_path,
+        svg_abs,
+        '--export-type=png',
+        f'--export-dpi={dpi}',
+        f'--export-filename={out_png}',
+    ]
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True,
+            encoding='utf-8', errors='replace', timeout=timeout)
+        stderr = result.stderr or ''
+        if stderr.strip():
+            # Log only real errors, not just the "M Z" warning noise
+            for line in stderr.splitlines():
+                if 'Malformed SVG path' in line or 'WARNING' in line:
+                    _log(f"  Inkscape stderr: {line}")
+        created = os.path.isfile(out_png) and os.path.getsize(out_png) > 0
+        return created
+    except subprocess.TimeoutExpired:
+        _log(f"  [ERROR] Inkscape timed out after {timeout}s")
+        return False
+    except FileNotFoundError:
+        _log(f"  [ERROR] Inkscape not found: {inkscape_path}")
+        return False
+    except Exception as e:
+        _log(f"  [ERROR] Inkscape call failed: {e}")
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Per-file conversion
+# ---------------------------------------------------------------------------
+
+def convert_svg_to_png(svg_path, output_dir, dpi, inkscape_path,
+                       create_subfolders=True, layer_rules=None):
+    """
+    Convert one SVG to PNG(s).
+    Returns (list_of_created_png_paths, success_bool).
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    svg_filename  = os.path.basename(svg_path)
+    file_base     = os.path.splitext(svg_filename)[0]
+
+    if create_subfolders:
+        out_sub = os.path.join(output_dir, file_base)
+        os.makedirs(out_sub, exist_ok=True)
+    else:
+        out_sub = output_dir
+
+    out_png = os.path.join(out_sub, f"{file_base}.png")
+
+    # Prepare (sanitize + embed + layers)
+    work_path, cleanup_tmp = _prepare_svg(svg_path, layer_rules, svg_filename)
+    work_path_abs = os.path.abspath(work_path)
+
+    try:
+        ok = _run_inkscape_png(inkscape_path, work_path_abs, out_png, dpi)
+        if ok:
+            sz = os.path.getsize(out_png)
+            _log(f"  [OK] {os.path.basename(out_png)}  ({sz:,} bytes)")
+            return [out_png], True
+        else:
+            _log(f"  [ERROR] Failed to create PNG for {svg_filename}")
+            return [], False
+    finally:
+        if cleanup_tmp and os.path.exists(work_path_abs):
+            try:
+                os.unlink(work_path_abs)
+            except Exception:
+                pass
+
+
+# ---------------------------------------------------------------------------
+# Batch conversion
+# ---------------------------------------------------------------------------
+
+def batch_convert(svg_folder, output_path, dpi,
+                  create_subfolders=True,
+                  inkscape_path=None,
+                  log_callback=None,
+                  progress_callback=None,
+                  layer_rules=None,
+                  selected_files=None):
+    """
+    Batch-convert SVG files to PNG.
+
+    Parameters
+    ----------
+    svg_folder       : directory containing the SVG files.
+    output_path      : directory where PNG files are written.
+    dpi              : export DPI (controls PNG resolution).
+    create_subfolders: create a subfolder per SVG in output_path.
+    inkscape_path    : path to the Inkscape executable.
+    log_callback     : callable(str) for log messages.
+    progress_callback: callable(current, total, message).
+    layer_rules      : dict of layer visibility rules.
+    selected_files   : list of SVG filenames to process; None = all.
+    """
     global global_log_callback
     global_log_callback = log_callback
-    
-    def log(message):
-        if log_callback:
-            log_callback(message)
-        else:
-            # Remove or replace emojis for Windows console compatibility
-            clean_message = message
-            # Replace all Unicode symbols with ASCII equivalents
-            replacements = {
-                '📁': '[FOLDER]',
-                '🎯': '[TARGET]', 
-                '📊': '[STATS]',
-                '✅': '[OK]',
-                '❌': '[ERROR]',
-                '⚠️': '[WARNING]',
-                '📂': '[FOLDER]',
-                '→': '->',  # Replace arrow with ASCII arrow
-                '🖼️': '[IMAGE]'
-            }
-            
-            for unicode_char, ascii_char in replacements.items():
-                clean_message = clean_message.replace(unicode_char, ascii_char)
-            
-            # Safe print for Windows console
-            try:
-                print(clean_message)
-            except UnicodeEncodeError:
-                # If still fails, remove all non-ASCII
-                safe_message = clean_message.encode('ascii', 'ignore').decode('ascii')
-                print(safe_message)
-    
-    # Default Inkscape path if not provided
+
     if not inkscape_path:
         inkscape_path = r"C:\Program Files\Inkscape\bin\inkscape.exe"
-    
-    # Get absolute paths
+
     svg_folder = os.path.abspath(svg_folder)
     output_dir = os.path.abspath(output_path)
-    
-    # Create output directory
     os.makedirs(output_dir, exist_ok=True)
-    
-    # Check if Inkscape exists
-    if not os.path.exists(inkscape_path):
-        log(f"[ERROR] Inkscape not found at: {inkscape_path}")
+
+    # Validate Inkscape
+    if not os.path.isfile(inkscape_path):
+        _log(f"[ERROR] Inkscape not found at: {inkscape_path}")
+        _log("[ERROR] Please set the correct path in the Settings tab.")
         return False
-    
-    # Get SVG files
-    svg_files = get_svg_files(svg_folder)
-    
+
+    all_svg_files = get_svg_files(svg_folder)
+    if selected_files is not None:
+        selected_set = set(selected_files)
+        svg_files    = [f for f in all_svg_files if f in selected_set]
+    else:
+        svg_files = all_svg_files
+
     if not svg_files:
-        log("[ERROR] No SVG files found in: " + svg_folder)
+        _log("[ERROR] No SVG files to convert in: " + svg_folder)
         return False
-    
-    log(f"[FOLDER] Found {len(svg_files)} SVG files in: {svg_folder}")
-    log(f"[FOLDER] Output folder: {output_dir}")
-    log(f"[TARGET] DPI: {dpi}")
-    log(f"[INKSCAPE] Using: {inkscape_path}")
-    log(f"[OPTION] Create subfolders: {create_subfolders}")
-    
-    if layer_rules:
-        rule_count = sum(len(rules) for rules in layer_rules.values())
-        log(f"[LAYER CONTROL] Enabled with {rule_count} rule(s)")
-    
-    total_files = len(svg_files)
+
+    _log("=" * 50)
+    _log("--Starting PNG conversion...")
+    _log(f"SVG Folder: {svg_folder}")
+    _log(f"Output Location: {output_dir}")
+    _log(f"DPI: {dpi}")
+    _log(f"Output Format: PNG")
+    _log(f"Files to convert: {len(svg_files)} of {len(all_svg_files)}")
+    _log(f"Create Subfolders: {create_subfolders}")
+    _log(f"Inkscape Path: {inkscape_path}")
+    _log("=" * 50)
+
+    total      = len(svg_files)
     successful = 0
-    failed = 0
-    
-    # Send initial progress (0%)
+    failed_list = []
+    all_pngs   = []
+
     if progress_callback:
-        progress_callback(0, total_files, "Starting conversion...")
-    
-    # Process each SVG file
+        progress_callback(0, total, "Starting PNG conversion...")
+
     for i, svg_file in enumerate(svg_files, 1):
         svg_path = os.path.join(svg_folder, svg_file)
-        file_base_name = os.path.splitext(svg_file)[0]
-        
-        # Update progress before starting this file
+
         if progress_callback:
-            progress_callback(i-1, total_files, f"Processing: {svg_file}")
-        
-        if create_subfolders:
-            # Create subfolder for each SVG file
-            file_output_dir = os.path.join(output_dir, file_base_name)
-            os.makedirs(file_output_dir, exist_ok=True)
-            # Output pattern: use SVG filename as base
-            output_pattern = os.path.join(file_output_dir, f"{file_base_name}.png")
-            target_dir = file_output_dir
-        else:
-            # All PNGs in same folder
-            # Output pattern: use SVG filename as base
-            output_pattern = os.path.join(output_dir, f"{file_base_name}.png")
-            target_dir = output_dir
-        
-        log(f"\n[{i}/{total_files}] Processing: {svg_file}")
-        
-        result = convert_svg_to_png(svg_path, output_pattern, dpi, inkscape_path, layer_rules)
-        
-        if result.returncode == 0:
+            progress_callback(i - 1, total, f"Processing: {svg_file}")
+
+        _log(f"\n[{i}/{total}] Processing: {svg_file}")
+
+        pngs, ok = convert_svg_to_png(
+            svg_path=svg_path,
+            output_dir=output_dir,
+            dpi=dpi,
+            inkscape_path=inkscape_path,
+            create_subfolders=create_subfolders,
+            layer_rules=layer_rules,
+        )
+
+        if ok and pngs:
             successful += 1
-            
-            # Get list of created files
-            if hasattr(result, 'files_created'):
-                # New format: result has files_created attribute
-                png_files = result.files_created
-            else:
-                # Old format: list directory
-                if os.path.exists(target_dir):
-                    png_files = [f for f in os.listdir(target_dir) if f.lower().endswith('.png')]
-                else:
-                    png_files = []
-            
-            if png_files:
-                log(f"[OK] Success! Created {len(png_files)} PNG files:")
-                for png in sorted(png_files):
-                    file_path = os.path.join(target_dir, png)
-                    if os.path.exists(file_path):
-                        file_size = os.path.getsize(file_path)
-                        log(f"      -> {png} ({file_size} bytes)")
-                    else:
-                        log(f"      -> {png}")
-            else:
-                log(f"[WARNING] No PNG files generated for {svg_file}")
+            all_pngs.extend(pngs)
         else:
-            failed += 1
-            log(f"[ERROR] Failed to process {svg_file}")
-            if result.stderr:
-                error_msg = result.stderr[:500]
-                log(f"   Error: {error_msg}")
-    
-    # Send final progress (100%)
+            failed_list.append(svg_file)
+            _log(f"[ERROR] Failed: {svg_file}")
+            _log(f"        Failed to create any PNG files")
+
+        if progress_callback:
+            progress_callback(i, total, f"Done: {svg_file}")
+
     if progress_callback:
-        progress_callback(total_files, total_files, "Conversion complete!")
-    
-    # Summary
-    log("\n" + "="*50)
-    log("CONVERSION SUMMARY")
-    log("="*50)
-    log(f"[STATS] Total SVG files processed: {total_files}")
-    log(f"[OK] Successful conversions: {successful}")
-    log(f"[ERROR] Failed conversions: {failed}")
-    log(f"[FOLDER] Output location: {output_dir}")
-    
-    # Count total PNG files created (walk through all directories)
-    total_pngs = 0
-    if create_subfolders:
-        for root, dirs, files in os.walk(output_dir):
-            pngs = [f for f in files if f.lower().endswith('.png')]
-            total_pngs += len(pngs)
-            if pngs:
-                log(f"[INFO] In {root}: {len(pngs)} PNG files")
-                for png in sorted(pngs):
-                    log(f"      {png}")
+        progress_callback(total, total, "PNG conversion complete!")
+
+    _log("\n" + "=" * 50)
+    _log("PNG CONVERSION SUMMARY")
+    _log("=" * 50)
+    _log(f"  Total  : {total}")
+    _log(f"  OK     : {successful}")
+    _log(f"  Failed : {len(failed_list)}")
+    _log(f"  Output : {output_dir}")
+    _log(f"  Total PNG files created: {len(all_pngs)}")
+    _log("=" * 50)
+
+    if successful > 0:
+        _log("✅ PNG conversion completed successfully!")
     else:
-        pngs = [f for f in os.listdir(output_dir) if f.lower().endswith('.png')]
-        total_pngs = len(pngs)
-        if pngs:
-            log(f"[INFO] PNG files in output directory:")
-            for png in sorted(pngs):
-                log(f"      {png}")
-    
-    log(f"[STATS] Total PNG files created: {total_pngs}")
-    log("="*50)
-    
+        _log("❌ PNG conversion failed!")
+
     return successful > 0
 
-# Function to handle command line interface (backward compatible)
-def batch_convert_cli(svg_folder, output_path, dpi, create_subfolders=True, inkscape_path=None):
-    """CLI wrapper for batch_convert without callbacks"""
-    return batch_convert(svg_folder, output_path, dpi, create_subfolders, inkscape_path)
 
-def convert_from_config(config_file='conversion_config.json'):
-    """Convert using configuration from JSON file"""
-    try:
-        with open(config_file, 'r') as f:
-            config = json.load(f)
-        
-        # Run conversion
-        return batch_convert_cli(
-            svg_folder=config.get('svg_folder', '.'),
-            output_path=config.get('output_path', './png_output'),
-            dpi=str(config.get('dpi', '96')),
-            create_subfolders=config.get('create_subfolders', True),
-            inkscape_path=config.get('inkscape_path')
-        )
-    except FileNotFoundError:
-        print("[ERROR] Config file not found: " + config_file)
-        return False
-    except json.JSONDecodeError:
-        print("[ERROR] Invalid config file: " + config_file)
-        return False
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 
 def main():
-    """Main function for command-line usage"""
     if len(sys.argv) >= 4:
-        # Get arguments from command line
-        svg_folder = sys.argv[1]
-        output_path = sys.argv[2]
-        dpi = sys.argv[3]
-        create_subfolders = True if len(sys.argv) < 5 else sys.argv[4].lower() == 'true'
-        
-        # Check for custom inkscape path (6th argument)
-        inkscape_path = None
-        if len(sys.argv) >= 6:
-            inkscape_path = sys.argv[5]
-        
-        # Use ASCII-safe printing for command line
-        print("Command line conversion:")
-        print("SVG Folder: " + svg_folder)
-        print("Output Path: " + output_path)
-        print("DPI: " + dpi)
-        print("Create Subfolders: " + str(create_subfolders))
-        if inkscape_path:
-            print("Inkscape Path: " + inkscape_path)
-        print("="*50)
-        
-        success = batch_convert_cli(svg_folder, output_path, dpi, create_subfolders, inkscape_path)
-        
-        if success:
-            print("\n[OK] Conversion completed successfully!")
-            return 0
-        else:
-            print("\n[ERROR] Conversion failed or no files processed!")
-            return 1
+        svg_folder    = sys.argv[1]
+        output_path   = sys.argv[2]
+        dpi           = sys.argv[3]
+        create_sub    = len(sys.argv) < 5 or sys.argv[4].lower() != 'false'
+        inkscape_path = sys.argv[5] if len(sys.argv) >= 6 else None
+
+        print(f"SVG → PNG  |  DPI: {dpi}  |  Subfolders: {create_sub}")
+        print("=" * 50)
+        success = batch_convert(
+            svg_folder, output_path, dpi, create_sub, inkscape_path)
+        return 0 if success else 1
     else:
-        print("Usage: python png.py <svg_folder> <output_path> <dpi> [create_subfolders] [inkscape_path]")
-        print("Example: python png.py ./svgs ./output/png_files 150 true")
-        print("Example: python png.py ./svgs ./output 300 false \"C:\\Custom\\inkscape.exe\"")
-        print("\nNote: output_path should include the folder name")
-        print("\nOr use with GUI: python gui.py")
+        print("Usage: python png.py <svg_folder> <output_path> <dpi> "
+              "[create_subfolders:true|false] [inkscape_path]")
         return 1
+
 
 if __name__ == "__main__":
     sys.exit(main())
