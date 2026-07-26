@@ -8,6 +8,7 @@ from tkinter import ttk
 import converter_tab
 import settings_tab
 import pdf_merge_tab
+import pdfjoin_tab
 
 class SVGtoPNGGUI:
     def __init__(self, root):
@@ -52,11 +53,13 @@ class SVGtoPNGGUI:
         # Initialize all tabs
         self.converter_tab = converter_tab.ConverterTab(notebook, self.shared_vars, self)
         self.pdf_merge_tab = pdf_merge_tab.PDFMergeTab(notebook, self.shared_vars, self)
+        self.pdfjoin_tab = pdfjoin_tab.PDFJoinTab(notebook, self.shared_vars, self)
         self.settings_tab = settings_tab.SettingsTab(notebook, self.shared_vars, self)
         
         # Add tabs to notebook
         notebook.add(self.converter_tab.frame, text='SVG to PNG')
         notebook.add(self.pdf_merge_tab.frame, text='PDF Merge')
+        notebook.add(self.pdfjoin_tab.frame, text='PDF Join')
         notebook.add(self.settings_tab.frame, text='Settings')
     
     def set_log_widget(self, log_widget):
